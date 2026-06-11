@@ -1,0 +1,113 @@
+name: Try to Create OCI VM
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+env:
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  IMAGE_ID: ${{ secrets.IMAGE_ID }}
+  SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  AD_NAMES: ${{ secrets.AD_NAMES || secrets.AD_NAME }}
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v1
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup OCI CLI and try to create VM
+        id: create_vm
+        run: |
+          set -o pipefail
+          pip install oci-cli
+
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat > ~/.oci/config <<EOF
+[DEFAULT]
+user=${{ secrets.OCI_CLI_USER }}
+tenancy=${{ secrets.OCI_CLI_TENANCY }}
+fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
+key_file=~/.oci/oci_api_key.pem
+region=${{ secrets.OCI_CLI_REGION }}
+          EOF
+
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+
+          all_output=""
+          success="false"
+          IFS=', ' read -r -a availability_domains <<< "$AD_NAMES"
+
+          for ad_name in "${availability_domains[@]}"; do
+            [ -z "$ad_name" ] && continue
+            echo "Trying availability domain: $ad_name"
+
+            oci_output=$(oci compute instance launch \
+              --compartment-id "$COMPARTMENT_ID" \
+              --availability-domain "$ad_name" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+              --subnet-id "$SUBNET_ID" \
+              --image-id "$IMAGE_ID" \
+              --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+              --assign-public-ip true \
+              --display-name "oracle-a1-4c24g" \
+              --boot-volume-size-in-gbs 200 2>&1 || true)
+
+            all_output="${all_output}
+          ===== ${ad_name} =====
+          ${oci_output}
+          "
+
+            if echo "$oci_output" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+              success="true"
+              break
+            fi
+          done
+
+          {
+            echo "log_data<<EOF"
+            echo "$all_output"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$success" = "true" ]; then
+            echo "Success: instance is provisioning."
+            exit 0
+          fi
+
+          echo "No capacity or another error prevented VM creation."
+          exit 1
+
+      - name: Send Discord notification
+        if: always() && env.DISCORD_WEBHOOK_URL != ''
+        uses: sarisia/actions-status-discord@v1.15.4
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
+          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
+          status: ${{ steps.create_vm.outcome }}
+          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          description: |
+            Attempt to create A1.Flex VM.
+            **Status:** `${{ steps.create_vm.outcome }}`
+            **Log Output:**
+            ```json
+            ${{ steps.create_vm.outputs.log_data }}
+            ```
