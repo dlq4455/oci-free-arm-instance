@@ -55,6 +55,15 @@ jobs:
 
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
+          cat > /home/runner/cloud-init.yaml <<'EOF'
+#cloud-config
+package_update: true
+runcmd:
+  - curl -fsSL https://gitlab.com/spiritysdx/Oracle-server-keep-alive-script/-/raw/main/oalive.sh -o /root/oalive.sh
+  - chmod +x /root/oalive.sh
+  - sh /root/oalive.sh --install
+EOF
+
           all_output=""
           success="false"
           IFS=', ' read -r -a availability_domains <<< "$AD_NAMES"
@@ -71,6 +80,7 @@ jobs:
               --subnet-id "$SUBNET_ID" \
               --image-id "$IMAGE_ID" \
               --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+              --user-data-file "/home/runner/cloud-init.yaml" \
               --assign-public-ip true \
               --display-name "oracle-a1-4c24g" \
               --boot-volume-size-in-gbs 200 2>&1 || true)
@@ -99,7 +109,7 @@ jobs:
           exit 1
 
       - name: Notify success with GitHub issue
-        if: success()
+        if: steps.create_vm.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -118,7 +128,8 @@ jobs:
           Workflow run: ${RUN_URL}"
 
       - name: Send success email
-        if: success()
+        if: steps.create_vm.outcome == 'success'
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
@@ -140,7 +151,7 @@ jobs:
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Disable workflow after success
-        if: success()
+        if: always() && steps.create_vm.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow disable create-vm.yml --repo "${{ github.repository }}"
