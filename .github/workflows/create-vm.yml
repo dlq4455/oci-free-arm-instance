@@ -132,13 +132,13 @@ EOF
         continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.qq.com
+          server_address: smtp.gmail.com
           server_port: 465
           secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "OCI A1 VM created: oracle-a1-4c24g"
-          to: 648058485@qq.com
+          to: dlq4455@gmail.com
           from: OCI A1 Notifier <${{ secrets.MAIL_USERNAME }}>
           body: |
             Oracle A1 VM creation succeeded.
