@@ -71,9 +71,10 @@ jobs:
               --boot-volume-size-in-gbs 200 2>&1 || true)
 
             all_output="${all_output}
-          ===== ${ad_name} =====
-          ${oci_output}
-          "
+===== ${ad_name} =====
+${oci_output}
+"
+            echo "$oci_output"
 
             if echo "$oci_output" | grep -q '"lifecycle-state": "PROVISIONING"'; then
               success="true"
