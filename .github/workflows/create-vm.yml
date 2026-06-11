@@ -117,6 +117,28 @@ jobs:
           SSH private key on your PC: F:\\dev\\test\\oracle_key
           Workflow run: ${RUN_URL}"
 
+      - name: Send success email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "OCI A1 VM created: oracle-a1-4c24g"
+          to: 276697055@qq.com
+          from: OCI A1 Notifier <${{ secrets.MAIL_USERNAME }}>
+          body: |
+            Oracle A1 VM creation succeeded.
+
+            Shape: VM.Standard.A1.Flex
+            OCPU/RAM: 4 OCPU / 24 GB
+            Boot volume: 200 GB
+            Region: us-phoenix-1
+            SSH private key on your PC: F:\dev\test\oracle_key
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
       - name: Disable workflow after success
         if: success()
         env:
