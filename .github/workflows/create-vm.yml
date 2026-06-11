@@ -14,8 +14,7 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
-  AD_NAMES: ${{ secrets.AD_NAMES || secrets.AD_NAME }}
-  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+  AD_NAMES: ${{ secrets.AD_NAMES }}
 
 jobs:
   create-vm:
@@ -40,14 +39,14 @@ jobs:
           echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          cat > ~/.oci/config <<EOF
-[DEFAULT]
-user=${{ secrets.OCI_CLI_USER }}
-tenancy=${{ secrets.OCI_CLI_TENANCY }}
-fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
-key_file=~/.oci/oci_api_key.pem
-region=${{ secrets.OCI_CLI_REGION }}
-          EOF
+          {
+            echo "[DEFAULT]"
+            echo "user=${{ secrets.OCI_CLI_USER }}"
+            echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}"
+            echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}"
+            echo "key_file=~/.oci/oci_api_key.pem"
+            echo "region=${{ secrets.OCI_CLI_REGION }}"
+          } > ~/.oci/config
 
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
@@ -95,19 +94,3 @@ region=${{ secrets.OCI_CLI_REGION }}
 
           echo "No capacity or another error prevented VM creation."
           exit 1
-
-      - name: Send Discord notification
-        if: always() && env.DISCORD_WEBHOOK_URL != ''
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
-            ```
