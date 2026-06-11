@@ -138,7 +138,7 @@ EOF
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "OCI A1 VM created: oracle-a1-4c24g"
-          to: 276697055@qq.com
+          to: 648058485@qq.com
           from: OCI A1 Notifier <${{ secrets.MAIL_USERNAME }}>
           body: |
             Oracle A1 VM creation succeeded.
