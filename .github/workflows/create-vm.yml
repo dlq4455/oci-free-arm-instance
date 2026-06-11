@@ -5,6 +5,11 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   IMAGE_ID: ${{ secrets.IMAGE_ID }}
@@ -92,3 +97,28 @@ jobs:
 
           echo "No capacity or another error prevented VM creation."
           exit 1
+
+      - name: Notify success with GitHub issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --assignee "${{ github.repository_owner }}" \
+            --title "OCI A1 VM created: oracle-a1-4c24g" \
+            --body "Oracle A1 VM creation succeeded. Instance is provisioning.
+
+          Shape: VM.Standard.A1.Flex
+          OCPU/RAM: 4 OCPU / 24 GB
+          Boot volume: 200 GB
+          Region: us-phoenix-1
+          SSH private key on your PC: F:\\dev\\test\\oracle_key
+          Workflow run: ${RUN_URL}"
+
+      - name: Disable workflow after success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable create-vm.yml --repo "${{ github.repository }}"
