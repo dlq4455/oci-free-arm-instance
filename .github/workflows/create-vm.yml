@@ -56,13 +56,13 @@ jobs:
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
           cat > /home/runner/cloud-init.yaml <<'EOF'
-#cloud-config
-package_update: true
-runcmd:
-  - curl -fsSL https://gitlab.com/spiritysdx/Oracle-server-keep-alive-script/-/raw/main/oalive.sh -o /root/oalive.sh
-  - chmod +x /root/oalive.sh
-  - sh /root/oalive.sh --install
-EOF
+          #cloud-config
+          package_update: true
+          runcmd:
+            - curl -fsSL https://gitlab.com/spiritysdx/Oracle-server-keep-alive-script/-/raw/main/oalive.sh -o /root/oalive.sh
+            - chmod +x /root/oalive.sh
+            - sh /root/oalive.sh --install
+          EOF
 
           all_output=""
           success="false"
