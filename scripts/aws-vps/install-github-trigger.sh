@@ -49,7 +49,7 @@ def log(message: str) -> None:
     print(f"{datetime.now(timezone.utc).isoformat()} {message}", flush=True)
 
 
-def request(method: str, url: str, token: str, body: dict | None = None):
+def request(method: str, url: str, token: str, body=None):
     data = None
     headers = {
         "Accept": "application/vnd.github+json",
