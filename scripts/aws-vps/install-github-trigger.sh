@@ -19,7 +19,6 @@ GITHUB_TOKEN="${GITHUB_TOKEN//$'\n'/}"
 REPO="${REPO:-dlq4455/oci-free-arm-instance}"
 WORKFLOW="${WORKFLOW:-create-vm.yml}"
 REF="${REF:-main}"
-AD_COUNT="${AD_COUNT:-3}"
 
 systemctl stop oci-vm-requester.timer oci-vm-requester.service >/dev/null 2>&1 || true
 systemctl disable oci-vm-requester.timer >/dev/null 2>&1 || true
@@ -34,7 +33,6 @@ GITHUB_TOKEN=$(printf '%q' "$GITHUB_TOKEN")
 REPO=$(printf '%q' "$REPO")
 WORKFLOW=$(printf '%q' "$WORKFLOW")
 REF=$(printf '%q' "$REF")
-AD_COUNT=$(printf '%q' "$AD_COUNT")
 EOF
 chmod 600 "$BASE_DIR/config.env"
 chown root:root "$BASE_DIR/config.env"
@@ -47,8 +45,6 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-
-STATE_FILE = "/opt/github-oci-trigger/ad_index"
 
 
 def log(message: str) -> None:
@@ -83,39 +79,11 @@ def request(method: str, url: str, token: str, body=None):
         return 0, None
 
 
-def get_ad_count() -> int:
-    raw_value = os.environ.get("AD_COUNT", "3").strip()
-    try:
-        return max(1, int(raw_value))
-    except ValueError:
-        log(f"invalid_ad_count value={raw_value!r}; using 3")
-        return 3
-
-
-def read_ad_index(ad_count: int) -> int:
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as handle:
-            return int(handle.read().strip()) % ad_count
-    except (FileNotFoundError, ValueError, OSError):
-        return 0
-
-
-def write_next_ad_index(current_index: int, ad_count: int) -> None:
-    next_index = (current_index + 1) % ad_count
-    tmp_path = f"{STATE_FILE}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(f"{next_index}\n")
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, STATE_FILE)
-
-
 def main() -> int:
     token = os.environ["GITHUB_TOKEN"].strip()
     repo = os.environ.get("REPO", "dlq4455/oci-free-arm-instance")
     workflow = os.environ.get("WORKFLOW", "create-vm.yml")
     ref = os.environ.get("REF", "main")
-    ad_count = get_ad_count()
-    ad_index = read_ad_index(ad_count)
     base = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}"
 
     status, workflow_data = request("GET", base, token)
@@ -140,10 +108,9 @@ def main() -> int:
             log(f"skip_existing_run id={run.get('id')} status={run.get('status')} conclusion={run.get('conclusion')}")
             return 0
 
-    status, _ = request("POST", f"{base}/dispatches", token, {"ref": ref, "inputs": {"ad_index": str(ad_index)}})
+    status, _ = request("POST", f"{base}/dispatches", token, {"ref": ref})
     if status == 204:
-        write_next_ad_index(ad_index, ad_count)
-        log(f"dispatched repo={repo} workflow={workflow} ref={ref} ad_index={ad_index} ad_count={ad_count}")
+        log(f"dispatched repo={repo} workflow={workflow} ref={ref}")
         return 0
 
     log(f"dispatch_failed status={status}")

@@ -2,11 +2,6 @@ name: Try to Create OCI VM
 
 on:
   workflow_dispatch:
-    inputs:
-      ad_index:
-        description: "0-based availability domain index to try. Empty tries all ADs."
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -86,7 +81,6 @@ jobs:
           all_output=""
           success="false"
           IFS=', ' read -r -a availability_domains <<< "$AD_NAMES"
-          requested_ad_index="${{ inputs.ad_index }}"
           ad_count="${#availability_domains[@]}"
 
           if [ "$ad_count" -eq 0 ]; then
@@ -94,19 +88,7 @@ jobs:
             exit 1
           fi
 
-          if [ -n "$requested_ad_index" ]; then
-            if ! [[ "$requested_ad_index" =~ ^[0-9]+$ ]]; then
-              echo "Invalid ad_index: $requested_ad_index"
-              exit 1
-            fi
-
-            selected_ad_index=$(( requested_ad_index % ad_count ))
-            selected_ad_name="${availability_domains[$selected_ad_index]}"
-            availability_domains=("$selected_ad_name")
-            echo "Selected availability domain index: $selected_ad_index ($selected_ad_name)"
-          else
-            echo "No ad_index input; trying all availability domains."
-          fi
+          echo "Trying all availability domains."
 
           for ad_name in "${availability_domains[@]}"; do
             [ -z "$ad_name" ] && continue
