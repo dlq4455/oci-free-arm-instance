@@ -9,10 +9,10 @@ This is necessary because the "Always Free" Arm instances are a popular resource
 ## Features
 
 * **Fully Automated:** Runs entirely within GitHub Actions. You don't need to run anything on your local machine.
-* **Persistent:** The workflow runs on a 10-minute schedule, continuously retrying until it successfully provisions your VM.
+* **Persistent:** The workflow runs on a 30-minute schedule, continuously retrying until it successfully provisions your VM.
 * **Secure:** All sensitive credentials, keys, and IDs are stored in encrypted GitHub Secrets. The repository itself contains no private information and is safe to be public.
 * **Fast:** Uses GitHub's caching to store the `oci-cli` installation, so subsequent runs are much faster.
-* **Informative:** Sends detailed notifications to a Discord channel on every attempt, showing the full success or error log (e.g., "Out of host capacity").
+* **Informative:** Sends email only when VM creation succeeds; failed capacity retries stay in GitHub Actions logs.
 
 ---
 
@@ -143,7 +143,7 @@ You're all set! Now you just need to start the process.
 2.  In the left sidebar, click on **"Try to Create OCI VM"**.
 3.  You will see a message: "This workflow has a `workflow_dispatch` event." Click the **"Run workflow"** button on the right, and then **"Run workflow"** again.
 
-This will start the first run. From now on, the `schedule` will automatically run it every 10 minutes. You can check the "Actions" tab to see the logs from each run. You will also get a notification in Discord every time it tries.
+This will start the first run. From now on, the `schedule` will automatically run it every 30 minutes. You can check the "Actions" tab to see the logs from each run. Email is sent only when VM creation succeeds.
 
 ---
 
@@ -158,7 +158,7 @@ As soon as you see this, you **MUST** disable the workflow.
 3.  Click the **three-dot (...)** menu on the right.
 4.  Click **"Disable workflow"**.
 
-If you do not do this, the action will continue running every 10 minutes and will try to create *another* VM, which will just fill your logs with errors.
+The workflow disables itself after a successful run. If it does not, disable it manually; otherwise, the action will continue running every 30 minutes and will try to create *another* VM, which will just fill your logs with errors.
 
 Your VM will be provisioning in the OCI console. You can now log in using the SSH key you provided.
 
