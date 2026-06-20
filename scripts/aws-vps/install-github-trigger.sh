@@ -14,6 +14,8 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 2
 fi
 
+GITHUB_TOKEN="${GITHUB_TOKEN//$'\r'/}"
+GITHUB_TOKEN="${GITHUB_TOKEN//$'\n'/}"
 REPO="${REPO:-dlq4455/oci-free-arm-instance}"
 WORKFLOW="${WORKFLOW:-create-vm.yml}"
 REF="${REF:-main}"
@@ -72,10 +74,13 @@ def request(method: str, url: str, token: str, body=None):
         payload = exc.read().decode("utf-8", errors="replace")
         log(f"http_error status={exc.code} body={payload[:1000]}")
         return exc.code, None
+    except Exception as exc:
+        log(f"request_error type={type(exc).__name__}")
+        return 0, None
 
 
 def main() -> int:
-    token = os.environ["GITHUB_TOKEN"]
+    token = os.environ["GITHUB_TOKEN"].strip()
     repo = os.environ.get("REPO", "dlq4455/oci-free-arm-instance")
     workflow = os.environ.get("WORKFLOW", "create-vm.yml")
     ref = os.environ.get("REF", "main")
@@ -125,6 +130,7 @@ set -Eeuo pipefail
 BASE_DIR="/opt/github-oci-trigger"
 LOG_DIR="/var/log/github-oci-trigger"
 mkdir -p "$LOG_DIR"
+find "$LOG_DIR" -type f -name '*.log*' -mtime +10 -delete
 
 set -a
 # shellcheck disable=SC1091
@@ -160,6 +166,18 @@ Unit=github-oci-trigger.service
 
 [Install]
 WantedBy=timers.target
+EOF
+
+cat > /etc/logrotate.d/github-oci-trigger <<'EOF'
+/var/log/github-oci-trigger/*.log {
+    size 5M
+    rotate 10
+    maxage 10
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
 EOF
 
 systemctl daemon-reload
