@@ -1,0 +1,83 @@
+name: Deploy OCI requester to AWS VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_HOST: ${{ secrets.AWS_HOST }}
+      AWS_USER: ${{ secrets.AWS_USER }}
+      AWS_SSH_KEY: ${{ secrets.AWS_SSH_KEY }}
+      COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+      IMAGE_ID: ${{ secrets.IMAGE_ID }}
+      SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+      OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+      OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+      OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+      AD_NAMES: ${{ secrets.AD_NAMES }}
+      SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      MAIL_TO: dlq4455@gmail.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AWS_SSH_KEY" > ~/.ssh/aws_deploy_key
+          chmod 600 ~/.ssh/aws_deploy_key
+          ssh-keyscan -H "$AWS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Build deployment package
+        run: |
+          set -euo pipefail
+          rm -rf package
+          mkdir -p package
+
+          {
+            printf 'COMPARTMENT_ID=%q\n' "$COMPARTMENT_ID"
+            printf 'IMAGE_ID=%q\n' "$IMAGE_ID"
+            printf 'SUBNET_ID=%q\n' "$SUBNET_ID"
+            printf 'OCI_CLI_REGION=%q\n' "$OCI_CLI_REGION"
+            printf 'OCI_CLI_USER=%q\n' "$OCI_CLI_USER"
+            printf 'OCI_CLI_TENANCY=%q\n' "$OCI_CLI_TENANCY"
+            printf 'OCI_CLI_FINGERPRINT=%q\n' "$OCI_CLI_FINGERPRINT"
+            printf 'AD_NAMES=%q\n' "$AD_NAMES"
+            printf 'MAIL_USERNAME=%q\n' "$MAIL_USERNAME"
+            printf 'MAIL_PASSWORD=%q\n' "$MAIL_PASSWORD"
+            printf 'MAIL_TO=%q\n' "$MAIL_TO"
+          } > package/config.env
+
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > package/oci_api_key.pem
+          printf '%s\n' "$SSH_PUBLIC_KEY" > package/ssh_authorized_key.pub
+          cp scripts/aws-vps/install-oci-requester.sh package/install-oci-requester.sh
+          tar -czf oci-vm-requester-package.tgz -C package .
+
+      - name: Install requester on AWS VPS
+        run: |
+          set -euo pipefail
+          scp -i ~/.ssh/aws_deploy_key oci-vm-requester-package.tgz "$AWS_USER@$AWS_HOST:/tmp/oci-vm-requester-package.tgz"
+          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" '
+            set -euo pipefail
+            rm -rf /tmp/oci-vm-requester-package
+            mkdir -p /tmp/oci-vm-requester-package
+            tar -xzf /tmp/oci-vm-requester-package.tgz -C /tmp/oci-vm-requester-package
+            sudo bash /tmp/oci-vm-requester-package/install-oci-requester.sh /tmp/oci-vm-requester-package
+          '
+
+      - name: Run initial test with email notification
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" 'sudo /opt/oci-vm-requester/runner.sh --test-notify'
+          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" 'sudo systemctl status oci-vm-requester.timer --no-pager || true; sudo tail -n 120 /var/log/oci-vm-requester/requester.log'
