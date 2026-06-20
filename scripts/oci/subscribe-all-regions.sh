@@ -40,6 +40,7 @@ main() {
   require_env OCI_CLI_FINGERPRINT
   require_env OCI_CLI_KEY_CONTENT
 
+  export SUPPRESS_LABEL_WARNING=True
   setup_oci_config
 
   local regions_json
