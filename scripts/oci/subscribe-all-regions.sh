@@ -77,10 +77,10 @@ main() {
   fi
 
   if [[ -z "$current_realm" || "$current_realm" == "null" ]]; then
-    echo "Could not determine realm for current region: $OCI_CLI_REGION" >&2
+    current_realm="ALL_LISTED"
+    echo "Region list does not expose realm fields; using every listed region."
     echo "Region list fields sample:"
     jq -r '.data[0] | keys_unsorted | join(",")' <<< "$regions_json" || true
-    exit 1
   fi
 
   existing_keys="$(jq -r '.data[] | (."region-key" // .regionKey // empty)' <<< "$subscriptions_json" | sort -u)"
@@ -121,7 +121,7 @@ main() {
     fi
   done < <(
     jq -r --arg realm "$current_realm" '.data[]
-      | select((."realm-key" // .realmKey // empty) == $realm)
+      | select(($realm == "ALL_LISTED") or ((."realm-key" // .realmKey // empty) == $realm))
       | [.key, (.name // ."region-identifier" // .identifier // .key)]
       | @tsv' <<< "$regions_json"
   )
