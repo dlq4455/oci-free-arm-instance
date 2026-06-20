@@ -28,20 +28,36 @@ jobs:
   create-vm:
     runs-on: ubuntu-latest
     steps:
-      - name: Cache pip packages
-        uses: actions/cache@v4
+      - name: Restore OCI CLI cache
+        id: oci_cli_cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
+          key: ${{ runner.os }}-pip-oci-cli-v2
 
       - name: Add OCI CLI to path
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          if command -v oci >/dev/null 2>&1; then
+            oci --version
+          else
+            python -m pip install --user oci-cli
+          fi
+          oci --version
+
+      - name: Save OCI CLI cache
+        if: steps.oci_cli_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
 
       - name: Setup OCI CLI and try to create VM
         id: create_vm
         run: |
           set -o pipefail
-          pip install oci-cli
 
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
@@ -96,7 +112,8 @@ jobs:
             [ -z "$ad_name" ] && continue
             echo "Trying availability domain: $ad_name"
 
-            oci_output=$(oci compute instance launch \
+            launch_started_at=$(date +%s)
+            oci_output=$(oci --no-retry compute instance launch \
               --compartment-id "$COMPARTMENT_ID" \
               --availability-domain "$ad_name" \
               --shape "VM.Standard.A1.Flex" \
@@ -108,8 +125,10 @@ jobs:
               --assign-public-ip true \
               --display-name "oracle-a1-free-2c12g" \
               --boot-volume-size-in-gbs 50 2>&1 || true)
+            launch_elapsed=$(( $(date +%s) - launch_started_at ))
 
             printf -v all_output '%s\n===== %s =====\n%s\n' "$all_output" "$ad_name" "$oci_output"
+            echo "OCI launch elapsed seconds: $launch_elapsed"
             echo "$oci_output"
 
             if echo "$oci_output" | grep -q '"lifecycle-state": "PROVISIONING"'; then
