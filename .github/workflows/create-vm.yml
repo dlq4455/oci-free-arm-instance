@@ -61,7 +61,7 @@ jobs:
           runcmd:
             - curl -fsSL https://gitlab.com/spiritysdx/Oracle-server-keep-alive-script/-/raw/main/oalive.sh -o /root/oalive.sh
             - chmod +x /root/oalive.sh
-            - sh /root/oalive.sh --install
+            - printf '1\nn\n1\ny\ny\n2\nn\n' | bash /root/oalive.sh
           EOF
 
           all_output=""
@@ -76,14 +76,14 @@ jobs:
               --compartment-id "$COMPARTMENT_ID" \
               --availability-domain "$ad_name" \
               --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+              --shape-config '{"ocpus":2,"memoryInGBs":12}' \
               --subnet-id "$SUBNET_ID" \
               --image-id "$IMAGE_ID" \
               --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
               --user-data-file "/home/runner/cloud-init.yaml" \
               --assign-public-ip true \
-              --display-name "oracle-a1-4c24g" \
-              --boot-volume-size-in-gbs 200 2>&1 || true)
+              --display-name "oracle-a1-free-2c12g" \
+              --boot-volume-size-in-gbs 50 2>&1 || true)
 
             printf -v all_output '%s\n===== %s =====\n%s\n' "$all_output" "$ad_name" "$oci_output"
             echo "$oci_output"
@@ -117,12 +117,12 @@ jobs:
           gh issue create \
             --repo "${{ github.repository }}" \
             --assignee "${{ github.repository_owner }}" \
-            --title "OCI A1 VM created: oracle-a1-4c24g" \
+            --title "OCI A1 VM created: oracle-a1-free-2c12g" \
             --body "Oracle A1 VM creation succeeded. Instance is provisioning.
 
           Shape: VM.Standard.A1.Flex
-          OCPU/RAM: 4 OCPU / 24 GB
-          Boot volume: 200 GB
+          OCPU/RAM: 2 OCPU / 12 GB
+          Boot volume: 50 GB
           Region: us-phoenix-1
           SSH private key on your PC: F:\\dev\\test\\oracle_key
           Workflow run: ${RUN_URL}"
@@ -137,15 +137,15 @@ jobs:
           secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "OCI A1 VM created: oracle-a1-4c24g"
+          subject: "OCI A1 VM created: oracle-a1-free-2c12g"
           to: dlq4455@gmail.com
           from: OCI A1 Notifier <${{ secrets.MAIL_USERNAME }}>
           body: |
             Oracle A1 VM creation succeeded.
 
             Shape: VM.Standard.A1.Flex
-            OCPU/RAM: 4 OCPU / 24 GB
-            Boot volume: 200 GB
+            OCPU/RAM: 2 OCPU / 12 GB
+            Boot volume: 50 GB
             Region: us-phoenix-1
             SSH private key on your PC: F:\dev\test\oracle_key
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
