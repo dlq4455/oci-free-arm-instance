@@ -67,8 +67,9 @@ jobs:
       - name: Install requester on AWS VPS
         run: |
           set -euo pipefail
-          scp -i ~/.ssh/aws_deploy_key oci-vm-requester-package.tgz "$AWS_USER@$AWS_HOST:/tmp/oci-vm-requester-package.tgz"
-          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" '
+          SSH_OPTS="-i ~/.ssh/aws_deploy_key -o ServerAliveInterval=20 -o ServerAliveCountMax=30"
+          scp $SSH_OPTS oci-vm-requester-package.tgz "$AWS_USER@$AWS_HOST:/tmp/oci-vm-requester-package.tgz"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" '
             set -euo pipefail
             rm -rf /tmp/oci-vm-requester-package
             mkdir -p /tmp/oci-vm-requester-package
@@ -79,8 +80,9 @@ jobs:
       - name: Run initial test with email notification
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" 'sudo /opt/oci-vm-requester/runner.sh --test-notify'
-          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" '
+          SSH_OPTS="-i ~/.ssh/aws_deploy_key -o ServerAliveInterval=20 -o ServerAliveCountMax=30"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" 'sudo /opt/oci-vm-requester/runner.sh --test-notify'
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" '
             if sudo test -f /opt/oci-vm-requester/succeeded; then
               sudo systemctl disable --now oci-vm-requester.timer >/dev/null 2>&1 || true
             else
