@@ -54,18 +54,41 @@ main() {
   regions_json=$(oci_json iam region list --all)
   subscriptions_json=$(oci_json iam region-subscription list --tenancy-id "$OCI_CLI_TENANCY" --all)
 
-  current_realm=$(jq -r --arg region "$OCI_CLI_REGION" '.data[] | select(.name == $region) | ."realm-key" // empty' <<< "$regions_json")
+  current_realm=$(jq -r --arg region "$OCI_CLI_REGION" '
+    .data[]
+    | select((.name? == $region) or (."region-identifier"? == $region) or (.identifier? == $region))
+    | (."realm-key" // .realmKey // empty)
+  ' <<< "$regions_json" | head -n 1)
+
+  if [[ -z "$current_realm" || "$current_realm" == "null" ]]; then
+    home_region_key=$(jq -r '
+      .data[]
+      | select((."is-home-region"? == true) or (.isHomeRegion? == true))
+      | (."region-key" // .regionKey // empty)
+    ' <<< "$subscriptions_json" | head -n 1)
+
+    if [[ -n "${home_region_key:-}" && "$home_region_key" != "null" ]]; then
+      current_realm=$(jq -r --arg key "$home_region_key" '
+        .data[]
+        | select(.key == $key)
+        | (."realm-key" // .realmKey // empty)
+      ' <<< "$regions_json" | head -n 1)
+    fi
+  fi
+
   if [[ -z "$current_realm" || "$current_realm" == "null" ]]; then
     echo "Could not determine realm for current region: $OCI_CLI_REGION" >&2
+    echo "Region list fields sample:"
+    jq -r '.data[0] | keys_unsorted | join(",")' <<< "$regions_json" || true
     exit 1
   fi
 
-  existing_keys="$(jq -r '.data[] | ."region-key"' <<< "$subscriptions_json" | sort -u)"
+  existing_keys="$(jq -r '.data[] | (."region-key" // .regionKey // empty)' <<< "$subscriptions_json" | sort -u)"
 
   echo "Current region: $OCI_CLI_REGION"
   echo "Current realm: $current_realm"
   echo "Existing subscriptions:"
-  jq -r '.data[] | "  - \(.["region-name"]) (\(.["region-key"])) status=\(.status) home=\(.["is-home-region"])"' <<< "$subscriptions_json"
+  jq -r '.data[] | "  - \(."region-name" // .regionName // "unknown") (\(."region-key" // .regionKey // "unknown")) status=\(.status) home=\(."is-home-region" // .isHomeRegion // false)"' <<< "$subscriptions_json"
   echo "Attempting to subscribe every un-subscribed region in realm $current_realm serially."
 
   while IFS=$'\t' read -r region_key region_name; do
@@ -98,8 +121,8 @@ main() {
     fi
   done < <(
     jq -r --arg realm "$current_realm" '.data[]
-      | select(."realm-key" == $realm)
-      | [.key, .name]
+      | select((."realm-key" // .realmKey // empty) == $realm)
+      | [.key, (.name // ."region-identifier" // .identifier // .key)]
       | @tsv' <<< "$regions_json"
   )
 
@@ -107,7 +130,7 @@ main() {
 
   echo "Current subscriptions after attempts:"
   if subscriptions_json=$(oci_json iam region-subscription list --tenancy-id "$OCI_CLI_TENANCY" --all); then
-    jq -r '.data[] | "  - \(.["region-name"]) (\(.["region-key"])) status=\(.status) home=\(.["is-home-region"])"' <<< "$subscriptions_json"
+    jq -r '.data[] | "  - \(."region-name" // .regionName // "unknown") (\(."region-key" // .regionKey // "unknown")) status=\(.status) home=\(."is-home-region" // .isHomeRegion // false)"' <<< "$subscriptions_json"
   fi
 
   if [[ "$failed" -gt 0 ]]; then
