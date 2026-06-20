@@ -1,0 +1,50 @@
+name: Subscribe OCI Regions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+
+jobs:
+  subscribe-regions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore OCI CLI cache
+        id: oci_cli_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          if command -v oci >/dev/null 2>&1; then
+            oci --version
+          else
+            python -m pip install --user oci-cli
+          fi
+          oci --version
+
+      - name: Save OCI CLI cache
+        if: steps.oci_cli_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
+
+      - name: Subscribe all possible OCI regions
+        run: bash scripts/oci/subscribe-all-regions.sh
