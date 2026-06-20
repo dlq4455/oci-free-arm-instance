@@ -18,7 +18,7 @@ for required in config.env oci_api_key.pem ssh_authorized_key.pub; do
   fi
 done
 
-dnf install -y python3 python3-pip jq curl util-linux >/dev/null
+dnf install -y python3 python3-pip jq util-linux >/dev/null
 python3 -m pip install --upgrade --user oci-cli >/dev/null
 
 install -d -m 700 -o root -g root "$BASE_DIR"
