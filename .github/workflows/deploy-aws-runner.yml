@@ -80,4 +80,12 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" 'sudo /opt/oci-vm-requester/runner.sh --test-notify'
-          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" 'sudo systemctl status oci-vm-requester.timer --no-pager || true; sudo tail -n 120 /var/log/oci-vm-requester/requester.log'
+          ssh -i ~/.ssh/aws_deploy_key "$AWS_USER@$AWS_HOST" '
+            if sudo test -f /opt/oci-vm-requester/succeeded; then
+              sudo systemctl disable --now oci-vm-requester.timer >/dev/null 2>&1 || true
+            else
+              sudo systemctl enable --now oci-vm-requester.timer
+            fi
+            sudo systemctl status oci-vm-requester.timer --no-pager || true
+            sudo tail -n 160 /var/log/oci-vm-requester/requester.log
+          '

@@ -18,6 +18,8 @@ for required in config.env oci_api_key.pem ssh_authorized_key.pub; do
   fi
 done
 
+systemctl stop oci-vm-requester.timer oci-vm-requester.service >/dev/null 2>&1 || true
+
 dnf install -y python3 python3-pip jq util-linux >/dev/null
 python3 -m pip install --upgrade --user oci-cli >/dev/null
 
@@ -226,7 +228,7 @@ cat > /etc/systemd/system/oci-vm-requester.timer <<'EOF'
 Description=Run Oracle Cloud A1 Free VM requester every 10 minutes
 
 [Timer]
-OnBootSec=2min
+OnActiveSec=10min
 OnUnitActiveSec=10min
 AccuracySec=30s
 Persistent=false
@@ -237,5 +239,5 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now oci-vm-requester.timer >/dev/null
+systemctl enable oci-vm-requester.timer >/dev/null
 systemctl list-timers --all oci-vm-requester.timer
