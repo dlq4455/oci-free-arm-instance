@@ -1,0 +1,67 @@
+name: Inspect OCI VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore OCI CLI cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          command -v oci >/dev/null 2>&1 || python -m pip install --user oci-cli
+          oci --version
+
+      - name: Inspect VM
+        run: |
+          export SUPPRESS_LABEL_WARNING=True
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_CLI_USER"
+            echo "tenancy=$OCI_CLI_TENANCY"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "key_file=~/.oci/oci_api_key.pem"
+            echo "region=$OCI_CLI_REGION"
+          } > ~/.oci/config
+
+          instance_id='${{ inputs.instance_id }}'
+          oci --no-retry compute instance get --instance-id "$instance_id" \
+            --query 'data.{name:"display-name",state:"lifecycle-state",shape:shape,ad:"availability-domain",time:"time-created"}' \
+            --output table
+
+          vnic_id=$(oci --no-retry compute vnic-attachment list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --instance-id "$instance_id" \
+            --query 'data[0]."vnic-id"' \
+            --raw-output)
+
+          oci --no-retry network vnic get --vnic-id "$vnic_id" \
+            --query 'data.{private_ip:"private-ip",public_ip:"public-ip",hostname:"hostname-label"}' \
+            --output table
