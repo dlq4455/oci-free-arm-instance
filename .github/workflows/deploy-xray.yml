@@ -247,7 +247,8 @@ jobs:
           /usr/local/bin/xray run -test -config "$XRAY_DIR/config.json"
           systemctl daemon-reload
           systemctl enable --now xray-iptables.service
-          systemctl enable --now xray
+          systemctl enable xray
+          systemctl restart xray
           sleep 2
           systemctl is-active --quiet xray
 
