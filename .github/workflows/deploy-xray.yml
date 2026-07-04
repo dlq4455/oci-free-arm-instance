@@ -1,0 +1,272 @@
+name: Deploy Xray Reality
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        required: true
+        type: string
+        default: ocid1.instance.oc1.phx.anyhqljrfzrpzuac55352eu2uc2morwejfheau3glc5xusvxdz5d5itrggfa
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+
+permissions:
+  contents: read
+
+env:
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore OCI CLI cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          command -v oci >/dev/null 2>&1 || python -m pip install --user oci-cli
+          oci --version
+
+      - name: Deploy Xray through OCI Run Command
+        run: |
+          set -Eeuo pipefail
+          export SUPPRESS_LABEL_WARNING=True
+
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_CLI_USER"
+            echo "tenancy=$OCI_CLI_TENANCY"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "key_file=~/.oci/oci_api_key.pem"
+            echo "region=$OCI_CLI_REGION"
+          } > ~/.oci/config
+
+          instance_id='${{ inputs.instance_id }}'
+          public_ip='${{ inputs.public_ip }}'
+
+          instance_state=$(oci --no-retry compute instance get \
+            --instance-id "$instance_id" \
+            --query 'data."lifecycle-state"' \
+            --raw-output)
+          test "$instance_state" = RUNNING
+
+          vnic_id=$(oci --no-retry compute vnic-attachment list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --instance-id "$instance_id" \
+            --query 'data[0]."vnic-id"' \
+            --raw-output)
+          subnet_id=$(oci --no-retry network vnic get \
+            --vnic-id "$vnic_id" \
+            --query 'data."subnet-id"' \
+            --raw-output)
+          security_list_id=$(oci --no-retry network subnet get \
+            --subnet-id "$subnet_id" \
+            --query 'data."security-list-ids"[0]' \
+            --raw-output)
+
+          oci --no-retry network security-list get \
+            --security-list-id "$security_list_id" \
+            > /tmp/security-list.json
+
+          has_443=$(jq -r '
+            any(.data."ingress-security-rules"[]?;
+              .protocol == "6"
+              and .source == "0.0.0.0/0"
+              and (.tcpOptions.destinationPortRange.min // 0) == 443
+              and (.tcpOptions.destinationPortRange.max // 0) == 443
+            )
+          ' /tmp/security-list.json)
+
+          if [ "$has_443" != "true" ]; then
+            jq '.data."ingress-security-rules" + [{
+              "protocol": "6",
+              "source": "0.0.0.0/0",
+              "sourceType": "CIDR_BLOCK",
+              "tcpOptions": {
+                "destinationPortRange": {
+                  "min": 443,
+                  "max": 443
+                }
+              }
+            }]' /tmp/security-list.json > /tmp/ingress.json
+            jq '.data."egress-security-rules"' /tmp/security-list.json > /tmp/egress.json
+            oci --no-retry network security-list update \
+              --security-list-id "$security_list_id" \
+              --ingress-security-rules file:///tmp/ingress.json \
+              --egress-security-rules file:///tmp/egress.json \
+              --force >/dev/null
+          fi
+
+          cat > /tmp/install-xray.sh <<'REMOTE'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          PUBLIC_IP="__PUBLIC_IP__"
+          XRAY_DIR=/usr/local/etc/xray
+          XRAY_SHARE_DIR=/usr/local/share/xray
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y ca-certificates curl unzip jq openssl
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+
+          arch=$(uname -m)
+          case "$arch" in
+            aarch64|arm64) asset='Xray-linux-arm64-v8a.zip' ;;
+            x86_64|amd64) asset='Xray-linux-64.zip' ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+
+          release_json=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)
+          asset_url=$(printf '%s' "$release_json" | jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .browser_download_url' | head -n 1)
+          test -n "$asset_url"
+
+          curl -fL "$asset_url" -o "$tmp/xray.zip"
+          unzip -q "$tmp/xray.zip" -d "$tmp/xray"
+          install -m 755 "$tmp/xray/xray" /usr/local/bin/xray
+          mkdir -p "$XRAY_DIR" "$XRAY_SHARE_DIR"
+          [ -f "$tmp/xray/geoip.dat" ] && install -m 644 "$tmp/xray/geoip.dat" "$XRAY_SHARE_DIR/geoip.dat"
+          [ -f "$tmp/xray/geosite.dat" ] && install -m 644 "$tmp/xray/geosite.dat" "$XRAY_SHARE_DIR/geosite.dat"
+
+          uuid=$(cat /proc/sys/kernel/random/uuid)
+          keys=$(/usr/local/bin/xray x25519)
+          private_key=$(printf '%s\n' "$keys" | awk -F': ' '/Private key/ {print $2}')
+          public_key=$(printf '%s\n' "$keys" | awk -F': ' '/Public key/ {print $2}')
+          short_id=$(openssl rand -hex 8)
+
+          cat > "$XRAY_DIR/config.json" <<EOF
+          {
+            "log": {
+              "loglevel": "warning"
+            },
+            "inbounds": [
+              {
+                "listen": "0.0.0.0",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                  "clients": [
+                    {
+                      "id": "$uuid",
+                      "flow": "xtls-rprx-vision"
+                    }
+                  ],
+                  "decryption": "none"
+                },
+                "streamSettings": {
+                  "network": "tcp",
+                  "security": "reality",
+                  "realitySettings": {
+                    "show": false,
+                    "dest": "www.microsoft.com:443",
+                    "xver": 0,
+                    "serverNames": [
+                      "www.microsoft.com"
+                    ],
+                    "privateKey": "$private_key",
+                    "shortIds": [
+                      "$short_id"
+                    ],
+                    "spiderX": "/"
+                  }
+                }
+              }
+            ],
+            "outbounds": [
+              {
+                "protocol": "freedom",
+                "tag": "direct"
+              }
+            ]
+          }
+          EOF
+          chmod 755 "$XRAY_DIR"
+          chmod 644 "$XRAY_DIR/config.json"
+
+          cat > /etc/systemd/system/xray.service <<'EOF'
+          [Unit]
+          Description=Xray Service
+          After=network.target nss-lookup.target
+
+          [Service]
+          User=nobody
+          CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+          AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+          NoNewPrivileges=true
+          ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+          Restart=on-failure
+          RestartSec=5s
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          /usr/local/bin/xray run -test -config "$XRAY_DIR/config.json"
+          systemctl daemon-reload
+          systemctl enable --now xray
+          sleep 2
+          systemctl is-active --quiet xray
+
+          link="vless://${uuid}@${PUBLIC_IP}:443?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&flow=xtls-rprx-vision#oracle-a1-reality"
+
+          echo "XRAY_STATUS=$(systemctl is-active xray)"
+          echo "XRAY_VERSION=$(/usr/local/bin/xray version | head -n 1)"
+          ss -tlnp | grep ':443 ' || true
+          systemctl --no-pager --full status cpu-limit.service memory-limit.service | sed -n '1,80p' || true
+          echo "VLESS_LINK=$link"
+          REMOTE
+
+          sed -i "s|__PUBLIC_IP__|$public_ip|g" /tmp/install-xray.sh
+          jq -n --rawfile script /tmp/install-xray.sh \
+            '{source: {sourceType: "TEXT", text: $script}, output: {outputType: "TEXT"}}' \
+            > /tmp/command-content.json
+          jq -n --arg instance_id "$instance_id" \
+            '{instanceId: $instance_id}' \
+            > /tmp/command-target.json
+
+          command_id=$(oci --no-retry instance-agent command create \
+            --compartment-id "$COMPARTMENT_ID" \
+            --display-name deploy-xray-reality \
+            --content file:///tmp/command-content.json \
+            --target file:///tmp/command-target.json \
+            --timeout-in-seconds 1200 \
+            --query 'data.id' \
+            --raw-output)
+          echo "command_id=$command_id"
+
+          execution=/tmp/command-execution.json
+          for _ in $(seq 1 90); do
+            oci --no-retry instance-agent command-execution get \
+              --command-id "$command_id" \
+              --instance-id "$instance_id" \
+              > "$execution" || true
+            state=$(jq -r '.data."lifecycle-state" // empty' "$execution")
+            echo "run_command_state=$state"
+            case "$state" in
+              SUCCEEDED|FAILED|TIMED_OUT|CANCELED) break ;;
+            esac
+            sleep 10
+          done
+
+          jq '.' "$execution"
+          jq -r '.data.content.output.text? // .data.output? // empty' "$execution" || true
+          test "$(jq -r '.data."lifecycle-state"' "$execution")" = SUCCEEDED
