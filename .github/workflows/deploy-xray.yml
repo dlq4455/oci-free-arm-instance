@@ -154,8 +154,8 @@ jobs:
 
           uuid=$(cat /proc/sys/kernel/random/uuid)
           keys=$(/usr/local/bin/xray x25519 2>&1)
-          private_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Private key" || $1 == "PrivateKey" {print $2; exit}')
-          public_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Public key" || $1 == "PublicKey" || $1 == "Password" {print $2; exit}')
+          private_key=$(printf '%s\n' "$keys" | awk -F':[[:space:]]*' '$1 == "Private key" || $1 == "PrivateKey" {print $2; exit}')
+          public_key=$(printf '%s\n' "$keys" | awk -F':[[:space:]]*' '$1 == "Public key" || $1 ~ /PublicKey/ || $1 == "Password" {print $2; exit}')
           if [ -z "$private_key" ] || [ -z "$public_key" ]; then
             printf '%s\n' "$keys" | sed -E 's/(:[[:space:]]*).+$/:\t<redacted>/'
             exit 1
