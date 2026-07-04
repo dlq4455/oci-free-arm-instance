@@ -153,11 +153,13 @@ jobs:
           [ -f "$tmp/xray/geosite.dat" ] && install -m 644 "$tmp/xray/geosite.dat" "$XRAY_SHARE_DIR/geosite.dat"
 
           uuid=$(cat /proc/sys/kernel/random/uuid)
-          keys=$(/usr/local/bin/xray x25519)
+          keys=$(/usr/local/bin/xray x25519 2>&1)
           private_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Private key" || $1 == "PrivateKey" {print $2; exit}')
           public_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Public key" || $1 == "PublicKey" || $1 == "Password" {print $2; exit}')
-          test -n "$private_key"
-          test -n "$public_key"
+          if [ -z "$private_key" ] || [ -z "$public_key" ]; then
+            printf '%s\n' "$keys" | sed -E 's/(:[[:space:]]*).+$/:\t<redacted>/'
+            exit 1
+          fi
           short_id=$(openssl rand -hex 8)
 
           cat > "$XRAY_DIR/config.json" <<EOF
