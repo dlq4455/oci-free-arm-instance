@@ -154,8 +154,10 @@ jobs:
 
           uuid=$(cat /proc/sys/kernel/random/uuid)
           keys=$(/usr/local/bin/xray x25519)
-          private_key=$(printf '%s\n' "$keys" | awk -F': ' '/Private key/ {print $2}')
-          public_key=$(printf '%s\n' "$keys" | awk -F': ' '/Public key/ {print $2}')
+          private_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Private key" || $1 == "PrivateKey" {print $2; exit}')
+          public_key=$(printf '%s\n' "$keys" | awk -F': *' '$1 == "Public key" || $1 == "PublicKey" || $1 == "Password" {print $2; exit}')
+          test -n "$private_key"
+          test -n "$public_key"
           short_id=$(openssl rand -hex 8)
 
           cat > "$XRAY_DIR/config.json" <<EOF
