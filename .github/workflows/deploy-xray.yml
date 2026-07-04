@@ -89,8 +89,8 @@ jobs:
             any(.data."ingress-security-rules"[]?;
               .protocol == "6"
               and .source == "0.0.0.0/0"
-              and (.tcpOptions.destinationPortRange.min // 0) == 443
-              and (.tcpOptions.destinationPortRange.max // 0) == 443
+              and ((.tcpOptions.destinationPortRange.min // ."tcp-options"."destination-port-range".min // 0) == 443)
+              and ((.tcpOptions.destinationPortRange.max // ."tcp-options"."destination-port-range".max // 0) == 443)
             )
           ' /tmp/security-list.json)
 
@@ -98,9 +98,9 @@ jobs:
             jq '.data."ingress-security-rules" + [{
               "protocol": "6",
               "source": "0.0.0.0/0",
-              "sourceType": "CIDR_BLOCK",
-              "tcpOptions": {
-                "destinationPortRange": {
+              "source-type": "CIDR_BLOCK",
+              "tcp-options": {
+                "destination-port-range": {
                   "min": 443,
                   "max": 443
                 }
@@ -210,10 +210,26 @@ jobs:
           chmod 755 "$XRAY_DIR"
           chmod 644 "$XRAY_DIR/config.json"
 
+          cat > /etc/systemd/system/xray-iptables.service <<'EOF'
+          [Unit]
+          Description=Allow inbound Xray TCP 443
+          Before=xray.service
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c '/usr/sbin/iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || /usr/sbin/iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
           cat > /etc/systemd/system/xray.service <<'EOF'
           [Unit]
           Description=Xray Service
-          After=network.target nss-lookup.target
+          After=network.target nss-lookup.target xray-iptables.service
+          Requires=xray-iptables.service
 
           [Service]
           User=nobody
@@ -230,6 +246,7 @@ jobs:
 
           /usr/local/bin/xray run -test -config "$XRAY_DIR/config.json"
           systemctl daemon-reload
+          systemctl enable --now xray-iptables.service
           systemctl enable --now xray
           sleep 2
           systemctl is-active --quiet xray
