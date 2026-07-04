@@ -1,0 +1,52 @@
+name: Remove Hysteria
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove Hysteria files
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
+
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "ubuntu@${public_ip}" \
+            'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          systemctl disable --now hysteria.service hysteria-server.service hysteria2.service hysteria2-server.service hy2.service 2>/dev/null || true
+          rm -f /etc/systemd/system/hysteria.service \
+                /etc/systemd/system/hysteria-server.service \
+                /etc/systemd/system/hysteria2.service \
+                /etc/systemd/system/hysteria2-server.service \
+                /etc/systemd/system/hy2.service
+          systemctl daemon-reload
+          rm -rf /etc/hysteria /etc/hysteria2 /var/log/hysteria /var/log/hysteria2
+          rm -f /usr/local/bin/hysteria /usr/local/bin/hysteria2 /usr/local/bin/hy2 \
+                /usr/bin/hysteria /usr/bin/hysteria2 /usr/bin/hy2
+          echo "HYSTERIA_UNITS=$(systemctl list-unit-files | grep -E 'hysteria|hy2' || true)"
+          echo "HYSTERIA_BINS=$(command -v hysteria || true) $(command -v hysteria2 || true) $(command -v hy2 || true)"
+          echo "XRAY_STATUS=$(systemctl is-active xray)"
+          echo "CPU_KEEPALIVE=$(systemctl is-active cpu-limit.service)"
+          echo "MEM_KEEPALIVE=$(systemctl is-active memory-limit.service)"
+          REMOTE
