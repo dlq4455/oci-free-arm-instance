@@ -73,10 +73,9 @@ jobs:
             --instance-id "$instance_id" \
             --query 'data[0]."vnic-id"' \
             --raw-output)
-          subnet_id=$(oci --no-retry network vnic get \
-            --vnic-id "$vnic_id" \
-            --query 'data."subnet-id"' \
-            --raw-output)
+          oci --no-retry network vnic get --vnic-id "$vnic_id" > /tmp/vnic.json
+          subnet_id=$(jq -r '.data."subnet-id"' /tmp/vnic.json)
+          echo "NSG_IDS=$(jq -r '.data."nsg-ids" // [] | join(",")' /tmp/vnic.json)"
           security_list_id=$(oci --no-retry network subnet get \
             --subnet-id "$subnet_id" \
             --query 'data."security-list-ids"[0]' \
@@ -255,3 +254,17 @@ jobs:
             -o ServerAliveCountMax=4 \
             "ubuntu@${public_ip}" \
             'sudo bash -s' < /tmp/install-xray.sh
+
+      - name: Verify public TCP 443 from runner
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+          for _ in $(seq 1 12); do
+            if timeout 5 bash -c ":</dev/tcp/${public_ip}/443"; then
+              echo "PUBLIC_443=reachable"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "PUBLIC_443=unreachable"
+          exit 1
