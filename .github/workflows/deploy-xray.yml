@@ -22,6 +22,7 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
 
 jobs:
   deploy:
@@ -41,7 +42,7 @@ jobs:
           command -v oci >/dev/null 2>&1 || python -m pip install --user oci-cli
           oci --version
 
-      - name: Deploy Xray through OCI Run Command
+      - name: Deploy Xray through SSH
         run: |
           set -Eeuo pipefail
           export SUPPRESS_LABEL_WARNING=True
@@ -113,6 +114,10 @@ jobs:
               --egress-security-rules file:///tmp/egress.json \
               --force >/dev/null
           fi
+
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
 
           cat > /tmp/install-xray.sh <<'REMOTE'
           #!/usr/bin/env bash
@@ -236,37 +241,13 @@ jobs:
           REMOTE
 
           sed -i "s|__PUBLIC_IP__|$public_ip|g" /tmp/install-xray.sh
-          jq -n --rawfile script /tmp/install-xray.sh \
-            '{source: {sourceType: "TEXT", text: $script}, output: {outputType: "TEXT"}}' \
-            > /tmp/command-content.json
-          jq -n --arg instance_id "$instance_id" \
-            '{instanceId: $instance_id}' \
-            > /tmp/command-target.json
-
-          command_id=$(oci --no-retry instance-agent command create \
-            --compartment-id "$COMPARTMENT_ID" \
-            --display-name deploy-xray-reality \
-            --content file:///tmp/command-content.json \
-            --target file:///tmp/command-target.json \
-            --timeout-in-seconds 1200 \
-            --query 'data.id' \
-            --raw-output)
-          echo "command_id=$command_id"
-
-          execution=/tmp/command-execution.json
-          for _ in $(seq 1 90); do
-            oci --no-retry instance-agent command-execution get \
-              --command-id "$command_id" \
-              --instance-id "$instance_id" \
-              > "$execution" || true
-            state=$(jq -r '.data."lifecycle-state" // empty' "$execution")
-            echo "run_command_state=$state"
-            case "$state" in
-              SUCCEEDED|FAILED|TIMED_OUT|CANCELED) break ;;
-            esac
-            sleep 10
-          done
-
-          jq '.' "$execution"
-          jq -r '.data.content.output.text? // .data.output? // empty' "$execution" || true
-          test "$(jq -r '.data."lifecycle-state"' "$execution")" = SUCCEEDED
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=4 \
+            "ubuntu@${public_ip}" \
+            'sudo bash -s' < /tmp/install-xray.sh
