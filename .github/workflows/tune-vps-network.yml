@@ -1,0 +1,52 @@
+name: Tune VPS Network
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable BBR
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
+
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "ubuntu@${public_ip}" \
+            'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          cat > /etc/sysctl.d/99-xray-bbr.conf <<'EOF'
+          net.core.default_qdisc=fq
+          net.ipv4.tcp_congestion_control=bbr
+          net.ipv4.tcp_mtu_probing=1
+          EOF
+          sysctl --system >/dev/null
+          echo "AVAILABLE_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control)"
+          echo "TCP_CONGESTION=$(sysctl -n net.ipv4.tcp_congestion_control)"
+          echo "DEFAULT_QDISC=$(sysctl -n net.core.default_qdisc)"
+          echo "TCP_MTU_PROBING=$(sysctl -n net.ipv4.tcp_mtu_probing)"
+          echo "XRAY_STATUS=$(systemctl is-active xray)"
+          echo "CPU_KEEPALIVE=$(systemctl is-active cpu-limit.service)"
+          echo "MEM_KEEPALIVE=$(systemctl is-active memory-limit.service)"
+          REMOTE
