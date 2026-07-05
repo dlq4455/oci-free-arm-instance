@@ -49,6 +49,33 @@ jobs:
           net.ipv4.tcp_wmem=4096 65536 67108864
           EOF
           sysctl --system >/dev/null
+
+          cat > /usr/local/sbin/xray-network-tune.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          dev=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+          test -n "$dev"
+          tc qdisc replace dev "$dev" root fq
+          EOF
+          chmod 755 /usr/local/sbin/xray-network-tune.sh
+
+          cat > /etc/systemd/system/xray-network-tune.service <<'EOF'
+          [Unit]
+          Description=Apply Xray network queue tuning
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/xray-network-tune.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now xray-network-tune.service
+
           default_dev=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
           test -n "$default_dev"
           tc qdisc replace dev "$default_dev" root fq
@@ -57,6 +84,7 @@ jobs:
           echo "TCP_CONGESTION=$(sysctl -n net.ipv4.tcp_congestion_control)"
           echo "DEFAULT_QDISC=$(sysctl -n net.core.default_qdisc)"
           echo "DEV_QDISC=$(tc qdisc show dev "$default_dev")"
+          echo "NETWORK_TUNE_SERVICE=$(systemctl is-active xray-network-tune.service)"
           echo "RMEM_MAX=$(sysctl -n net.core.rmem_max)"
           echo "WMEM_MAX=$(sysctl -n net.core.wmem_max)"
           echo "TCP_FASTOPEN=$(sysctl -n net.ipv4.tcp_fastopen)"
