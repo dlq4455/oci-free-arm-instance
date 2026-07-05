@@ -156,17 +156,20 @@ jobs:
           with open(path, encoding="utf-8") as f:
               config = json.load(f)
 
-          config["inbounds"] = [i for i in config.get("inbounds", []) if i.get("port") != test_port]
+          base = next(i for i in config["inbounds"] if i.get("port") == 443 and i.get("protocol") == "vless")
+          if test_port != 443:
+              config["inbounds"] = [i for i in config.get("inbounds", []) if i.get("port") != test_port]
 
           if action == "set":
-              base = next(i for i in config["inbounds"] if i.get("port") == 443 and i.get("protocol") == "vless")
-              test = copy.deepcopy(base)
-              test["port"] = test_port
-              test["tag"] = f"reality-target-test-{test_port}"
+              test = base if test_port == 443 else copy.deepcopy(base)
+              if test_port != 443:
+                  test["port"] = test_port
+                  test["tag"] = f"reality-target-test-{test_port}"
               reality = test["streamSettings"]["realitySettings"]
               reality["dest"] = f"{target}:443"
               reality["serverNames"] = [target]
-              config["inbounds"].append(test)
+              if test_port != 443:
+                  config["inbounds"].append(test)
 
           with open(path, "w", encoding="utf-8") as f:
               json.dump(config, f, indent=2)
