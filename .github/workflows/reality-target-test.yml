@@ -1,0 +1,200 @@
+name: Reality Target Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        required: true
+        type: choice
+        options: [set, cleanup]
+        default: set
+      target:
+        required: true
+        type: string
+        default: www.cloudflare.com
+      test_port:
+        required: true
+        type: string
+        default: "8443"
+      instance_id:
+        required: true
+        type: string
+        default: ocid1.instance.oc1.phx.anyhqljrfzrpzuac55352eu2uc2morwejfheau3glc5xusvxdz5d5itrggfa
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+
+permissions:
+  contents: read
+
+env:
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+
+jobs:
+  reality-target-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore OCI CLI cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v2
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          command -v oci >/dev/null 2>&1 || python -m pip install --user oci-cli
+          oci --version
+
+      - name: Configure test target
+        run: |
+          set -Eeuo pipefail
+          export SUPPRESS_LABEL_WARNING=True
+
+          action='${{ inputs.action }}'
+          target='${{ inputs.target }}'
+          test_port='${{ inputs.test_port }}'
+          instance_id='${{ inputs.instance_id }}'
+          public_ip='${{ inputs.public_ip }}'
+
+          case "$test_port" in
+            ''|*[!0-9]*) echo "invalid test_port=$test_port" >&2; exit 1 ;;
+          esac
+
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_CLI_USER"
+            echo "tenancy=$OCI_CLI_TENANCY"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "key_file=~/.oci/oci_api_key.pem"
+            echo "region=$OCI_CLI_REGION"
+          } > ~/.oci/config
+
+          vnic_id=$(oci --no-retry compute vnic-attachment list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --instance-id "$instance_id" \
+            --query 'data[0]."vnic-id"' \
+            --raw-output)
+          subnet_id=$(oci --no-retry compute vnic get \
+            --vnic-id "$vnic_id" \
+            --query 'data."subnet-id"' \
+            --raw-output)
+          security_list_id=$(oci --no-retry network subnet get \
+            --subnet-id "$subnet_id" \
+            --query 'data."security-list-ids"[0]' \
+            --raw-output)
+          oci --no-retry network security-list get \
+            --security-list-id "$security_list_id" \
+            > /tmp/security-list.json
+
+          if [ "$action" = set ]; then
+            has_port=$(jq -r --argjson p "$test_port" '
+              any(.data."ingress-security-rules"[]?;
+                .protocol == "6"
+                and .source == "0.0.0.0/0"
+                and ((.tcpOptions.destinationPortRange.min // ."tcp-options"."destination-port-range".min // 0) == $p)
+                and ((.tcpOptions.destinationPortRange.max // ."tcp-options"."destination-port-range".max // 0) == $p)
+              )
+            ' /tmp/security-list.json)
+            if [ "$has_port" != true ]; then
+              jq --argjson p "$test_port" '.data."ingress-security-rules" + [{
+                "protocol": "6",
+                "source": "0.0.0.0/0",
+                "source-type": "CIDR_BLOCK",
+                "tcp-options": {"destination-port-range": {"min": $p, "max": $p}}
+              }]' /tmp/security-list.json > /tmp/ingress.json
+            else
+              jq '.data."ingress-security-rules"' /tmp/security-list.json > /tmp/ingress.json
+            fi
+          else
+            jq --argjson p "$test_port" '[.data."ingress-security-rules"[]? | select(
+              .protocol != "6"
+              or ((.tcpOptions.destinationPortRange.min // ."tcp-options"."destination-port-range".min // 0) != $p)
+              or ((.tcpOptions.destinationPortRange.max // ."tcp-options"."destination-port-range".max // 0) != $p)
+            )]' /tmp/security-list.json > /tmp/ingress.json
+          fi
+          jq '.data."egress-security-rules"' /tmp/security-list.json > /tmp/egress.json
+          oci --no-retry network security-list update \
+            --security-list-id "$security_list_id" \
+            --ingress-security-rules file:///tmp/ingress.json \
+            --egress-security-rules file:///tmp/egress.json \
+            --force >/dev/null
+
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
+
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "ubuntu@${public_ip}" \
+            "sudo ACTION='$action' TARGET='$target' TEST_PORT='$test_port' python3 -" <<'PY'
+          import copy, json, os, subprocess
+
+          path = "/usr/local/etc/xray/config.json"
+          action = os.environ["ACTION"]
+          target = os.environ["TARGET"]
+          test_port = int(os.environ["TEST_PORT"])
+
+          with open(path, encoding="utf-8") as f:
+              config = json.load(f)
+
+          config["inbounds"] = [i for i in config.get("inbounds", []) if i.get("port") != test_port]
+
+          if action == "set":
+              base = next(i for i in config["inbounds"] if i.get("port") == 443 and i.get("protocol") == "vless")
+              test = copy.deepcopy(base)
+              test["port"] = test_port
+              test["tag"] = f"reality-target-test-{test_port}"
+              reality = test["streamSettings"]["realitySettings"]
+              reality["dest"] = f"{target}:443"
+              reality["serverNames"] = [target]
+              config["inbounds"].append(test)
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(config, f, indent=2)
+
+          subprocess.check_call(["/usr/local/bin/xray", "run", "-test", "-config", path])
+          if action == "set":
+              if subprocess.call(["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(test_port), "-j", "ACCEPT"]) != 0:
+                  subprocess.check_call(["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", str(test_port), "-j", "ACCEPT"])
+          else:
+              while subprocess.call(["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(test_port), "-j", "ACCEPT"]) == 0:
+                  subprocess.call(["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(test_port), "-j", "ACCEPT"])
+          subprocess.check_call(["systemctl", "restart", "xray"])
+          print(f"ACTION={action}")
+          print(f"TARGET={target}")
+          print(f"TEST_PORT={test_port}")
+          print("XRAY_STATUS=" + subprocess.check_output(["systemctl", "is-active", "xray"], text=True).strip())
+          PY
+
+      - name: Verify public test port
+        if: inputs.action == 'set'
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+          test_port='${{ inputs.test_port }}'
+          for _ in $(seq 1 12); do
+            if timeout 5 bash -c ":</dev/tcp/${public_ip}/${test_port}"; then
+              echo "PUBLIC_TEST_PORT=reachable"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "PUBLIC_TEST_PORT=unreachable"
+          exit 1
