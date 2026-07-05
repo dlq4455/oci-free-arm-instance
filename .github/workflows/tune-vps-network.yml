@@ -49,9 +49,14 @@ jobs:
           net.ipv4.tcp_wmem=4096 65536 67108864
           EOF
           sysctl --system >/dev/null
+          default_dev=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+          test -n "$default_dev"
+          tc qdisc replace dev "$default_dev" root fq
+          echo "DEFAULT_DEV=$default_dev"
           echo "AVAILABLE_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control)"
           echo "TCP_CONGESTION=$(sysctl -n net.ipv4.tcp_congestion_control)"
           echo "DEFAULT_QDISC=$(sysctl -n net.core.default_qdisc)"
+          echo "DEV_QDISC=$(tc qdisc show dev "$default_dev")"
           echo "RMEM_MAX=$(sysctl -n net.core.rmem_max)"
           echo "WMEM_MAX=$(sysctl -n net.core.wmem_max)"
           echo "TCP_FASTOPEN=$(sysctl -n net.ipv4.tcp_fastopen)"
