@@ -89,7 +89,7 @@ jobs:
             --instance-id "$instance_id" \
             --query 'data[0]."vnic-id"' \
             --raw-output)
-          subnet_id=$(oci --no-retry compute vnic get \
+          subnet_id=$(oci --no-retry network vnic get \
             --vnic-id "$vnic_id" \
             --query 'data."subnet-id"' \
             --raw-output)
