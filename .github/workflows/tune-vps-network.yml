@@ -42,7 +42,8 @@ jobs:
           net.core.wmem_max=67108864
           net.ipv4.tcp_congestion_control=bbr
           net.ipv4.tcp_fastopen=3
-          net.ipv4.tcp_mtu_probing=1
+          net.ipv4.tcp_mtu_probing=2
+          net.ipv4.tcp_no_metrics_save=1
           net.ipv4.tcp_rmem=4096 87380 67108864
           net.ipv4.tcp_slow_start_after_idle=0
           net.ipv4.tcp_wmem=4096 65536 67108864
@@ -55,6 +56,7 @@ jobs:
           echo "WMEM_MAX=$(sysctl -n net.core.wmem_max)"
           echo "TCP_FASTOPEN=$(sysctl -n net.ipv4.tcp_fastopen)"
           echo "TCP_MTU_PROBING=$(sysctl -n net.ipv4.tcp_mtu_probing)"
+          echo "TCP_NO_METRICS_SAVE=$(sysctl -n net.ipv4.tcp_no_metrics_save)"
           echo "TCP_RMEM=$(sysctl -n net.ipv4.tcp_rmem)"
           echo "TCP_WMEM=$(sysctl -n net.ipv4.tcp_wmem)"
           echo "SLOW_START_IDLE=$(sysctl -n net.ipv4.tcp_slow_start_after_idle)"
