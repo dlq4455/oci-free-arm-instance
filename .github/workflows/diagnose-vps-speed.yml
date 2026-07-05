@@ -1,0 +1,61 @@
+name: Diagnose VPS Speed
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose VPS
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
+
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "ubuntu@${public_ip}" \
+            'bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+
+          echo "HOST=$(hostname)"
+          echo "UPTIME=$(uptime -p)"
+          echo "XRAY_STATUS=$(systemctl is-active xray)"
+          echo "CPU_KEEPALIVE=$(systemctl is-active cpu-limit.service)"
+          echo "MEM_KEEPALIVE=$(systemctl is-active memory-limit.service)"
+          echo "TCP_CONGESTION=$(sysctl -n net.ipv4.tcp_congestion_control)"
+          echo "DEFAULT_QDISC=$(sysctl -n net.core.default_qdisc)"
+          echo "TCP_RMEM=$(sysctl -n net.ipv4.tcp_rmem)"
+          echo "TCP_WMEM=$(sysctl -n net.ipv4.tcp_wmem)"
+          echo "LISTEN_443=$(ss -ltn sport = :443 | tail -n +2 | wc -l)"
+          echo "ESTABLISHED_443=$(ss -tn state established sport = :443 | tail -n +2 | wc -l)"
+
+          for url in \
+            "https://speed.cloudflare.com/__down?bytes=10000000" \
+            "https://cachefly.cachefly.net/10mb.test"
+          do
+            echo "VPS_DOWNLOAD_URL=$url"
+            curl -4 -L -o /dev/null -sS --connect-timeout 10 --max-time 60 \
+              -w "http=%{http_code} bytes=%{size_download} time=%{time_total} speed_Bps=%{speed_download}\n" \
+              "$url" || true
+          done
+          REMOTE
