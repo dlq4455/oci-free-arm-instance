@@ -1,0 +1,101 @@
+name: Temporary Xray Sockopt MSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_ip:
+        required: true
+        type: string
+        default: 129.146.94.18
+      mode:
+        required: true
+        type: choice
+        default: apply
+        options:
+          - apply
+          - rollback
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Patch live Xray sockopt
+        run: |
+          set -Eeuo pipefail
+          public_ip='${{ inputs.public_ip }}'
+          mode='${{ inputs.mode }}'
+
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle_ssh_key
+          chmod 600 /tmp/oracle_ssh_key
+
+          ssh -i /tmp/oracle_ssh_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "ubuntu@${public_ip}" \
+            "sudo MODE='${mode}' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          config=/usr/local/etc/xray/config.json
+          backup="/usr/local/etc/xray/config.json.before-mss.$(date +%Y%m%d%H%M%S)"
+          cp "$config" "$backup"
+
+          python3 - "$config" "$MODE" <<'PY'
+          import json
+          import sys
+
+          config_path, mode = sys.argv[1], sys.argv[2]
+          with open(config_path, "r", encoding="utf-8") as fh:
+              data = json.load(fh)
+
+          changed = False
+          for inbound in data.get("inbounds", []):
+              if inbound.get("port") != 443 or inbound.get("protocol") != "vless":
+                  continue
+              stream = inbound.setdefault("streamSettings", {})
+              if mode == "apply":
+                  sockopt = stream.setdefault("sockopt", {})
+                  before = dict(sockopt)
+                  sockopt["tcpcongestion"] = "bbr"
+                  sockopt["tcpMaxSeg"] = 1360
+                  changed = changed or sockopt != before
+              elif mode == "rollback":
+                  sockopt = stream.get("sockopt")
+                  if isinstance(sockopt, dict):
+                      before = dict(sockopt)
+                      sockopt.pop("tcpcongestion", None)
+                      sockopt.pop("tcpMaxSeg", None)
+                      if not sockopt:
+                          stream.pop("sockopt", None)
+                      changed = changed or before != stream.get("sockopt", {})
+              else:
+                  raise SystemExit(f"unsupported mode: {mode}")
+
+          if not changed:
+              print("CONFIG_CHANGED=false")
+          else:
+              with open(config_path, "w", encoding="utf-8") as fh:
+                  json.dump(data, fh, indent=2, ensure_ascii=False)
+                  fh.write("\n")
+              print("CONFIG_CHANGED=true")
+          PY
+
+          /usr/local/bin/xray run -test -config "$config"
+          systemctl restart xray
+          sleep 2
+          systemctl is-active --quiet xray
+
+          echo "XRAY_STATUS=$(systemctl is-active xray)"
+          echo "CPU_KEEPALIVE=$(systemctl is-active cpu-limit.service)"
+          echo "MEM_KEEPALIVE=$(systemctl is-active memory-limit.service)"
+          jq '.inbounds[] | select(.port == 443 and .protocol == "vless") | .streamSettings | {network, security, sockopt, dest: .realitySettings.dest, serverNames: .realitySettings.serverNames}' "$config"
+          echo "BACKUP=$backup"
+          REMOTE
