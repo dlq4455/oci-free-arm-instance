@@ -82,6 +82,8 @@ jobs:
             echo "region=$OCI_CLI_REGION"
           } > ~/.oci/config
 
+          set -x
+
           vnic_id=$(oci --no-retry compute vnic-attachment list \
             --compartment-id "$COMPARTMENT_ID" \
             --instance-id "$instance_id" \
