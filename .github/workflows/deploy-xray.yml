@@ -3,6 +3,13 @@ name: Deploy Xray Reality
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        required: true
+        type: choice
+        default: xray
+        options:
+          - xray
+          - wofo-dr
       instance_id:
         required: true
         type: string
@@ -26,6 +33,7 @@ env:
 
 jobs:
   deploy:
+    if: inputs.mode == 'xray'
     runs-on: ubuntu-latest
     steps:
       - name: Restore OCI CLI cache
@@ -287,3 +295,213 @@ jobs:
           done
           echo "PUBLIC_443=unreachable"
           exit 1
+
+  deploy_wofo_dr:
+    if: inputs.mode == 'wofo-dr'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare signed artifacts and root-only configuration
+        env:
+          RELEASE_URL: ${{ secrets.WOFO_RELEASE_URL }}
+          SEED_URL: ${{ secrets.WOFO_SEED_URL }}
+          ADMIN_TOKEN: ${{ secrets.WOFO_ADMIN_TOKEN }}
+          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.WOFO_BOOTSTRAP_ADMIN_PASSWORD }}
+          TUNNEL_CREDENTIALS_B64: ${{ secrets.WOFO_ORACLE_TUNNEL_CREDENTIALS_B64 }}
+          AWS_DR_PUBLIC_KEY: ${{ secrets.WOFO_AWS_DR_PUBLIC_KEY }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$RELEASE_URL"
+          test -n "$SEED_URL"
+          test -n "$ADMIN_TOKEN"
+          test -n "$BOOTSTRAP_ADMIN_PASSWORD"
+          test -n "$TUNNEL_CREDENTIALS_B64"
+          test -n "$AWS_DR_PUBLIC_KEY"
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+
+          curl -fsSL "$RELEASE_URL" -o /tmp/wofo-release.tar.gz
+          echo 'bb8eab1cc0e16aba643338d704902a44da2d951dd1b8fa0b1b019874c53ab85e  /tmp/wofo-release.tar.gz' | sha256sum -c -
+          curl -fsSL "$SEED_URL" -o /tmp/wofo-seed.tar.gz
+          echo '2122a00d0671b0768f71db060fb3ed75562b21039de4a2f530e8550893716e49  /tmp/wofo-seed.tar.gz' | sha256sum -c -
+          printf '%s' "$TUNNEL_CREDENTIALS_B64" | base64 -d > /tmp/cloudflared-credentials.json
+          printf '%s\n' "$AWS_DR_PUBLIC_KEY" > /tmp/aws-dr.pub
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+
+          cat > /tmp/wofo.env <<EOF
+          WOFO_ORIGIN=oracle
+          WOFO_HOST=127.0.0.1
+          WOFO_PORT=8787
+          WOFO_DB_PATH=/srv/wofo/data/wofo.sqlite
+          WOFO_FILES_DIR=/srv/wofo/data/files
+          WOFO_ROLE_FILE=/srv/wofo/state/role
+          WOFO_REPLICA_STATE_FILE=/srv/wofo/state/replica.json
+          WOFO_RELEASE_FILE=/opt/wofo/current/RELEASE
+          WOFO_SERVICE_USER=wofo
+          WOFO_MIN_FREE_GIB=8
+          INITIAL_ROLE=standby
+          ENVIRONMENT=production
+          PASSWORD_ITERATIONS=100000
+          CODE_TTL_SECONDS=600
+          RATE_LIMIT_WINDOW_SECONDS=60
+          RATE_LIMIT_MAX_REQUESTS=5
+          RAW_IP_RETENTION_DAYS=7
+          ISSUE_ATTACHMENT_MAX_BYTES=10485760
+          ISSUE_EVENT_RETENTION_DAYS=30
+          ISSUE_RATE_LIMIT_WINDOW_SECONDS=60
+          ISSUE_RATE_LIMIT_MAX_INSTALL_EVENTS=20
+          ISSUE_RATE_LIMIT_MAX_USER_EVENTS=60
+          APP_VERSION=1.1.8
+          APP_BUILD_NUMBER=17
+          APP_CHANNEL=internal
+          APP_DOWNLOAD_URL=https://download-stage.airoute.xyz/download
+          APP_RELEASE_NOTES=production-standby-1.1.8
+          APP_FORCE_UPDATE=false
+          APP_MIN_SUPPORTED_BUILD_NUMBER=1
+          APP_APK_SIZE="250.6 MB"
+          APP_PUBLISHED_AT=2026-07-10T07:46:41.287Z
+          APK_OBJECT_KEY=releases/wofo_app_pro-v1.1.8-build17-internal.apk
+          DOWNLOAD_MANIFEST_KEY=downloads/releases.json
+          RELEASE_PUBLIC_BASE_URL=https://download-stage.airoute.xyz
+          ADMIN_CORS_ORIGINS=https://wofo-oracle-stage.airoute.xyz
+          ADMIN_LOGIN_MAX_ATTEMPTS=5
+          ADMIN_LOGIN_WINDOW_SECONDS=900
+          ADMIN_SESSION_TTL_SECONDS=3600
+          BOOTSTRAP_ADMIN_EMAIL=admin
+          WOFO_WECHAT_ENABLED=false
+          PASSWORD_PEPPER=
+          IP_HASH_SECRET=
+          WECHAT_APP_ID=
+          WECHAT_APP_SECRET=
+          INTERNAL_OPS_TOKEN=
+          ADMIN_TOKEN=$ADMIN_TOKEN
+          BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_ADMIN_PASSWORD
+          WECHAT_TEST_OPENID=
+          WECHAT_TEST_UNIONID=
+          WECHAT_TEST_NICKNAME=
+          DR_SNAPSHOT_ROOT=/srv/wofo/snapshots
+          DR_REPLICA_ROOT=/srv/wofo/replica
+          DR_SNAPSHOT_GROUP=wofo-dr
+          DR_SHORT_RETENTION_MINUTES=1440
+          DR_DAILY_RETENTION_DAYS=30
+          DR_REMOTE_HOST=35.73.41.205
+          DR_REMOTE_PORT=22
+          DR_REMOTE_USER=ec2-user
+          DR_REMOTE_SSH_KEY=/var/lib/wofo/.ssh/wofo-dr-ed25519
+          DR_REMOTE_KNOWN_HOSTS=/var/lib/wofo/.ssh/known_hosts
+          DR_REMOTE_SNAPSHOT_ROOT=/srv/wofo/replica
+          DR_OPERATOR_USER=ubuntu
+          CLOUDFLARE_TUNNEL_ID=439094de-03e3-4a49-b66c-98d4a1a6b7c3
+          PUBLIC_HOSTNAME=wofo-oracle-stage.airoute.xyz
+          RELEASE_HOSTNAME=download-stage.airoute.xyz
+          EOF
+
+      - name: Install Oracle standby without touching Xray
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(
+            -i /tmp/oracle-ssh-key
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=4
+          )
+          scp "${ssh_opts[@]}" \
+            /tmp/wofo-release.tar.gz /tmp/wofo-seed.tar.gz /tmp/wofo.env \
+            /tmp/cloudflared-credentials.json /tmp/aws-dr.pub \
+            "ubuntu@${PUBLIC_IP}:/tmp/"
+
+          ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          listener_before=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          systemctl is-active --quiet xray
+          echo "XRAY_BEFORE=active"
+          printf '%s\n' "$listener_before"
+          df -h /
+
+          release_stage=/var/tmp/wofo-release-f9437623
+          seed_stage=/var/tmp/wofo-production-seed-20260711-092716
+          rm -rf -- "$release_stage" "$seed_stage"
+          install -d -m 0755 "$release_stage" "$seed_stage"
+          tar -xzf /tmp/wofo-release.tar.gz -C "$release_stage"
+          tar -xzf /tmp/wofo-seed.tar.gz -C "$seed_stage"
+          bash "$release_stage/ops/aws-oracle-dr/bootstrap-host.sh" --release-site --apply
+
+          install -d -o root -g root -m 0755 /etc/wofo
+          install -o root -g root -m 0600 /tmp/cloudflared-credentials.json /etc/wofo/cloudflared-credentials.json
+          bash "$release_stage/ops/aws-oracle-dr/install.sh" --env /tmp/wofo.env
+          bash "$release_stage/ops/aws-oracle-dr/deploy-release.sh" \
+            --artifact /tmp/wofo-release.tar.gz \
+            --release f9437623-oracle-standby \
+            --sha256 bb8eab1cc0e16aba643338d704902a44da2d951dd1b8fa0b1b019874c53ab85e
+
+          test ! -e /srv/wofo/data/wofo.sqlite
+          set -a
+          source /etc/wofo/wofo.env
+          set +a
+          /usr/local/bin/node /opt/wofo/current/server/wofo-runtime/src/cli.mjs import-sql \
+            --db /srv/wofo/data/wofo.sqlite --sql "$seed_stage/d1-production.sql"
+          /usr/local/bin/node /opt/wofo/current/server/wofo-runtime/src/cli.mjs import-kv \
+            --db /srv/wofo/data/wofo.sqlite --input "$seed_stage/kv-wofo-production.json"
+          /usr/local/bin/node /opt/wofo/current/server/wofo-runtime/src/cli.mjs import-files \
+            --db /srv/wofo/data/wofo.sqlite \
+            --manifest "$seed_stage/r2-aws-import-manifest.json" \
+            --source "$seed_stage/r2-dynamic"
+          chown -R wofo:wofo /srv/wofo/data
+
+          install -d -o root -g root -m 0755 /srv/wofo/releases-public/objects/downloads
+          install -o root -g root -m 0644 \
+            "$seed_stage/r2-dynamic/downloads/releases.json" \
+            /srv/wofo/releases-public/objects/downloads/releases.json
+          rm -f /etc/nginx/sites-enabled/default
+          nginx -t
+
+          install -d -o wofo -g wofo -m 0700 /var/lib/wofo/.ssh
+          if [ ! -f /var/lib/wofo/.ssh/wofo-dr-ed25519 ]; then
+            sudo -u wofo ssh-keygen -q -t ed25519 -N '' -C wofo-oracle-dr \
+              -f /var/lib/wofo/.ssh/wofo-dr-ed25519
+          fi
+          ssh-keyscan -H 35.73.41.205 > /var/lib/wofo/.ssh/known_hosts
+          chown wofo:wofo /var/lib/wofo/.ssh/known_hosts
+          chmod 0600 /var/lib/wofo/.ssh/known_hosts
+          install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.ssh
+          touch /home/ubuntu/.ssh/authorized_keys
+          grep -qxF "$(cat /tmp/aws-dr.pub)" /home/ubuntu/.ssh/authorized_keys \
+            || cat /tmp/aws-dr.pub >> /home/ubuntu/.ssh/authorized_keys
+          chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+          chmod 0600 /home/ubuntu/.ssh/authorized_keys
+
+          printf 'standby\n' > /srv/wofo/state/role
+          chown root:wofo /srv/wofo/state/role
+          chmod 0640 /srv/wofo/state/role
+          /usr/local/bin/node /opt/wofo/current/server/wofo-runtime/src/cli.mjs readiness \
+            --db /srv/wofo/data/wofo.sqlite \
+            --expected-version 1.1.8 --expected-build 17 \
+            --expected-hash 1D183153FDAF8A307A11E96C259EA92381EFFD7710BFF130B0801D3666B56A9C
+
+          systemctl restart wofo-runtime.service
+          systemctl restart nginx.service
+          systemctl restart wofo-cloudflared.service
+          for _ in $(seq 1 10); do
+            curl -fsS --max-time 5 http://127.0.0.1:8787/health && break
+            sleep 1
+          done
+          curl -fsS --max-time 5 http://127.0.0.1:8788/objects/downloads/releases.json >/dev/null
+
+          listener_after=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          test "$listener_before" = "$listener_after"
+          systemctl is-active --quiet xray
+          systemctl is-active --quiet wofo-runtime
+          systemctl is-active --quiet nginx
+          systemctl is-active --quiet wofo-cloudflared
+          echo "XRAY_AFTER=active"
+          printf 'ORACLE_DR_PUBLIC_KEY='
+          cat /var/lib/wofo/.ssh/wofo-dr-ed25519.pub
+          df -h /
+          REMOTE
