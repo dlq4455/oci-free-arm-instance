@@ -798,10 +798,11 @@ jobs:
             if [ "$(jq -r .origin <<<"$health" 2>/dev/null)" = oracle ] && \
                [ "$(jq -r .role <<<"$health" 2>/dev/null)" = primary ] && \
                [ "$(jq -r .release_sha <<<"$health" 2>/dev/null)" = "$release" ]; then
-              curl -fsS https://fy.airoute.xyz/v1/app/bootstrap >/dev/null
-              curl -fsSL https://fy.airoute.xyz/download >/dev/null
-              echo "PROMOTE_ORACLE=passed release=$release"
-              exit 0
+              if curl -fsS https://fy.airoute.xyz/v1/app/bootstrap >/dev/null && \
+                 curl -fsSL https://fy.airoute.xyz/download >/dev/null; then
+                echo "PROMOTE_ORACLE=passed release=$release"
+                exit 0
+              fi
             fi
             sleep 3
           done
