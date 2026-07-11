@@ -12,6 +12,9 @@ on:
           - wofo-dr
           - wofo-code
           - wofo-assets
+          - wofo-dr-check
+          - promote-oracle
+          - failback-aws
       instance_id:
         required: true
         type: string
@@ -660,3 +663,174 @@ jobs:
           test "$listener_before" = "$listener_after"
           systemctl is-active --quiet xray
           REMOTE
+
+  wofo_dr_check:
+    if: inputs.mode == 'wofo-dr-check'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Oracle replica and bidirectional control path
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+          ssh -i /tmp/oracle-ssh-key -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
+          snapshot=$(/usr/local/sbin/wofo-dr-hostctl inspect-current)
+          test "$(jq -r .role <<<"$status")" = standby
+          test "$(jq -r .release_sha <<<"$status")" = "$(jq -r .release_sha <<<"$snapshot")"
+          age=$(( $(date -u +%s) - $(jq -r .created_epoch <<<"$snapshot") ))
+          test "$age" -le 600
+          /usr/local/sbin/wofo-dr-hostctl verify-current \
+            "$(jq -r .snapshot_id <<<"$snapshot")" \
+            "$(jq -r .release_sha <<<"$snapshot")" 600 0
+          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            -o ConnectTimeout=20 ec2-user@35.73.41.205 \
+            'sudo -n /usr/local/sbin/wofo-dr-hostctl status-json'
+          echo "DR_CHECK=passed snapshot=$(jq -r .snapshot_id <<<"$snapshot") age=${age}s"
+          REMOTE
+
+  promote_oracle:
+    if: inputs.mode == 'promote-oracle'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fence AWS, promote Oracle, switch DNS, and smoke
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+          CF_DNS_TOKEN: ${{ secrets.WOFO_CF_DNS_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$CF_DNS_TOKEN"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+          ssh_opts=(-i /tmp/oracle-ssh-key -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20)
+
+          result=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
+          snapshot=$(/usr/local/sbin/wofo-dr-hostctl inspect-current)
+          test "$(jq -r .role <<<"$status")" = standby
+          release=$(jq -r .release_sha <<<"$snapshot")
+          test "$(jq -r .release_sha <<<"$status")" = "$release"
+          id=$(jq -r .snapshot_id <<<"$snapshot")
+          /usr/local/sbin/wofo-dr-hostctl verify-current "$id" "$release" 600 0
+          set +e
+          fence_output=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            -o ConnectTimeout=15 ec2-user@35.73.41.205 \
+            'sudo -n /usr/local/sbin/wofo-dr-hostctl fence' 2>&1)
+          fence_rc=$?
+          set -e
+          if [ "$fence_rc" -ne 0 ] && ! grep -Eqi 'timed out|no route|connection refused|network is unreachable' <<<"$fence_output"; then
+            echo "$fence_output" >&2
+            exit "$fence_rc"
+          fi
+          /usr/local/sbin/wofo-dr-hostctl promote "$id" "$release" 600 0
+          printf 'SNAPSHOT_ID=%s\nRELEASE=%s\n' "$id" "$release"
+          REMOTE
+          )
+          echo "$result"
+          release=$(awk -F= '$1=="RELEASE"{print $2}' <<<"$result")
+          test -n "$release"
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $CF_DNS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"type":"CNAME","name":"fy.airoute.xyz","content":"439094de-03e3-4a49-b66c-98d4a1a6b7c3.cfargotunnel.com","ttl":1,"proxied":true}' \
+            'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/dns_records/2a7e7273cd2841022aec31783fd7020b' \
+            | jq -e '.success == true' >/dev/null
+          for _ in $(seq 1 20); do
+            health=$(curl -fsS --max-time 10 https://fy.airoute.xyz/health || true)
+            if [ "$(jq -r .origin <<<"$health" 2>/dev/null)" = oracle ] && \
+               [ "$(jq -r .role <<<"$health" 2>/dev/null)" = primary ] && \
+               [ "$(jq -r .release_sha <<<"$health" 2>/dev/null)" = "$release" ]; then
+              curl -fsS https://fy.airoute.xyz/v1/app/bootstrap >/dev/null
+              curl -fsSL https://fy.airoute.xyz/download >/dev/null
+              echo "PROMOTE_ORACLE=passed release=$release"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo 'Oracle DNS changed but public smoke did not converge; leaving Oracle primary to avoid split-brain.' >&2
+          exit 1
+
+  failback_aws:
+    if: inputs.mode == 'failback-aws'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Oracle to AWS, promote AWS, switch DNS, and demote Oracle
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+          CF_DNS_TOKEN: ${{ secrets.WOFO_CF_DNS_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$CF_DNS_TOKEN"
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+          ssh_opts=(-i /tmp/oracle-ssh-key -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20)
+
+          result=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
+          test "$(jq -r .role <<<"$status")" = primary
+          release=$(jq -r .release_sha <<<"$status")
+          /usr/local/sbin/wofo-dr-hostctl fence
+          /usr/local/sbin/wofo-dr-hostctl replicate-to-peer
+          snapshot=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            ec2-user@35.73.41.205 \
+            'sudo -n /usr/local/sbin/wofo-dr-hostctl inspect-current')
+          id=$(jq -r .snapshot_id <<<"$snapshot")
+          test "$(jq -r .release_sha <<<"$snapshot")" = "$release"
+          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            ec2-user@35.73.41.205 \
+            "sudo -n /usr/local/sbin/wofo-dr-hostctl verify-current '$id' '$release' 600 0"
+          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            ec2-user@35.73.41.205 \
+            "sudo -n /usr/local/sbin/wofo-dr-hostctl promote '$id' '$release' 600 0"
+          printf 'SNAPSHOT_ID=%s\nRELEASE=%s\n' "$id" "$release"
+          REMOTE
+          )
+          echo "$result"
+          release=$(awk -F= '$1=="RELEASE"{print $2}' <<<"$result")
+          test -n "$release"
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $CF_DNS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"type":"CNAME","name":"fy.airoute.xyz","content":"a4fdf1b0-c0ac-4138-a432-fe72c5434776.cfargotunnel.com","ttl":1,"proxied":true}' \
+            'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/dns_records/2a7e7273cd2841022aec31783fd7020b' \
+            | jq -e '.success == true' >/dev/null
+          for _ in $(seq 1 20); do
+            health=$(curl -fsS --max-time 10 https://fy.airoute.xyz/health || true)
+            if [ "$(jq -r .origin <<<"$health" 2>/dev/null)" = aws ] && \
+               [ "$(jq -r .role <<<"$health" 2>/dev/null)" = primary ] && \
+               [ "$(jq -r .release_sha <<<"$health" 2>/dev/null)" = "$release" ]; then
+              curl -fsS https://fy.airoute.xyz/v1/app/bootstrap >/dev/null
+              ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+                'sudo /usr/local/sbin/wofo-dr-hostctl demote'
+              echo "FAILBACK_AWS=passed release=$release"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo 'AWS DNS changed but public smoke did not converge; leaving Oracle fenced to avoid split-brain.' >&2
+          exit 1
