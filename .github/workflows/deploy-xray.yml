@@ -852,19 +852,19 @@ jobs:
               'sudo /usr/local/sbin/wofo-dr-hostctl unfence-primary' || true
           }
 
-          result=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
-          set -Eeuo pipefail
-          status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
+          status=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+            'sudo /usr/local/sbin/wofo-dr-hostctl status-json')
           test "$(jq -r .role <<<"$status")" = primary
           release=$(jq -r .release_sha <<<"$status")
-          /usr/local/sbin/wofo-dr-hostctl fence
-          /usr/local/sbin/wofo-dr-hostctl replicate-to-peer
-          printf 'RELEASE=%s\n' "$release"
-          REMOTE
-          )
-          echo "$result"
-          release=$(awk -F= '$1=="RELEASE"{print $2}' <<<"$result")
           test -n "$release"
+          ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+            'sudo /usr/local/sbin/wofo-dr-hostctl fence'
+          set +e
+          replication_output=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+            'sudo /usr/local/sbin/wofo-dr-hostctl replicate-to-peer' 2>&1)
+          replication_rc=$?
+          set -e
+          echo "$replication_output"
           set +e
           snapshot=$(ssm_run '/usr/local/sbin/wofo-dr-hostctl inspect-current' 2>&1)
           inspect_rc=$?
@@ -875,7 +875,13 @@ jobs:
             exit "$inspect_rc"
           fi
           id=$(jq -r .snapshot_id <<<"$snapshot")
-          test "$(jq -r .release_sha <<<"$snapshot")" = "$release"
+          snapshot_release=$(jq -r .release_sha <<<"$snapshot")
+          snapshot_age=$(( $(date -u +%s) - $(jq -r .created_epoch <<<"$snapshot") ))
+          if [ "$snapshot_release" != "$release" ] || [ "$snapshot_age" -gt 600 ]; then
+            echo "Replication did not produce an eligible AWS snapshot (ssh_rc=$replication_rc age=${snapshot_age}s)." >&2
+            restore_oracle
+            exit 1
+          fi
           set +e
           promote_output=$(ssm_run "/usr/local/sbin/wofo-dr-hostctl verify-current '$id' '$release' 600 0 && /usr/local/sbin/wofo-dr-hostctl promote '$id' '$release' 600 0" 2>&1)
           promote_rc=$?
