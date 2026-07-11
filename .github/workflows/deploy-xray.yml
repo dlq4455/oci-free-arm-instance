@@ -10,6 +10,7 @@ on:
         options:
           - xray
           - wofo-dr
+          - wofo-code
           - wofo-assets
       instance_id:
         required: true
@@ -593,4 +594,69 @@ jobs:
           find "$root/downloads" "$root/releases" -type f -printf '%s\n' \
             | awk '{count += 1; bytes += $1} END {printf "RELEASE_OBJECTS=%d RELEASE_BYTES=%.0f\n", count, bytes}'
           df -h /
+          REMOTE
+
+  deploy_wofo_code:
+    if: inputs.mode == 'wofo-code'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare verified runtime artifact and Oracle credentials
+        env:
+          RELEASE_URL: ${{ secrets.WOFO_RELEASE_URL }}
+          RELEASE_SHA256: ${{ secrets.WOFO_RELEASE_SHA256 }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$RELEASE_URL"
+          test -n "$RELEASE_SHA256"
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          curl -fsSL --retry 3 "$RELEASE_URL" -o /tmp/wofo-release.tar.gz
+          echo "$RELEASE_SHA256  /tmp/wofo-release.tar.gz" | sha256sum -c -
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+
+      - name: Upgrade Oracle standby without touching Xray
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+          RELEASE_SHA256: ${{ secrets.WOFO_RELEASE_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(
+            -i /tmp/oracle-ssh-key
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=4
+          )
+          scp "${ssh_opts[@]}" /tmp/wofo-release.tar.gz "ubuntu@${PUBLIC_IP}:/tmp/"
+          ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+            "sudo RELEASE_SHA256='$RELEASE_SHA256' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          listener_before=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          systemctl is-active --quiet xray
+          work=$(mktemp -d)
+          trap 'rm -rf "$work" /tmp/wofo-release.tar.gz' EXIT
+          echo "$RELEASE_SHA256  /tmp/wofo-release.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/wofo-release.tar.gz -C "$work"
+          bash "$work/ops/aws-oracle-dr/install.sh" --env /etc/wofo/wofo.env
+          bash "$work/ops/aws-oracle-dr/deploy-release.sh" \
+            --artifact /tmp/wofo-release.tar.gz \
+            --release dbb8ce8b-oracle \
+            --sha256 "$RELEASE_SHA256" \
+            --env /etc/wofo/wofo.env
+          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            -o ConnectTimeout=20 \
+            ec2-user@35.73.41.205 \
+            'sudo -n /usr/local/sbin/wofo-dr-hostctl status-json'
+          /usr/local/sbin/wofo-dr-hostctl status-json
+          listener_after=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          test "$listener_before" = "$listener_after"
+          systemctl is-active --quiet xray
           REMOTE
