@@ -725,6 +725,20 @@ jobs:
           test "$(jq -r .release_sha <<<"$status")" = "$release"
           id=$(jq -r .snapshot_id <<<"$snapshot")
           /usr/local/sbin/wofo-dr-hostctl verify-current "$id" "$release" 600 0
+          aws_fenced=0
+          oracle_promoted=0
+          rollback_failed_promotion() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ "$aws_fenced" -eq 1 ] && [ "$oracle_promoted" -eq 0 ]; then
+              sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+                -o BatchMode=yes -o IdentitiesOnly=yes \
+                -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+                ec2-user@35.73.41.205 \
+                'sudo -n /usr/local/sbin/wofo-dr-hostctl unfence-primary' || true
+            fi
+            exit "$rc"
+          }
+          trap rollback_failed_promotion EXIT
           set +e
           fence_output=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
             -o BatchMode=yes -o IdentitiesOnly=yes \
@@ -733,11 +747,26 @@ jobs:
             'sudo -n /usr/local/sbin/wofo-dr-hostctl fence' 2>&1)
           fence_rc=$?
           set -e
-          if [ "$fence_rc" -ne 0 ] && ! grep -Eqi 'timed out|no route|connection refused|network is unreachable' <<<"$fence_output"; then
+          set +e
+          aws_status=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
+            -o ConnectTimeout=15 ec2-user@35.73.41.205 \
+            'sudo -n /usr/local/sbin/wofo-dr-hostctl status-json' 2>&1)
+          status_rc=$?
+          set -e
+          if [ "$status_rc" -eq 0 ] && [ "$(jq -r .role <<<"$aws_status")" = fenced ]; then
+            aws_fenced=1
+          elif [ "$fence_rc" -ne 0 ] && grep -Eqi 'timed out|no route|connection refused|network is unreachable' <<<"$fence_output $aws_status"; then
+            echo 'AWS network outage confirmed; continuing with Oracle promotion.'
+          else
             echo "$fence_output" >&2
-            exit "$fence_rc"
+            echo "$aws_status" >&2
+            exit 1
           fi
           /usr/local/sbin/wofo-dr-hostctl promote "$id" "$release" 600 0
+          oracle_promoted=1
+          trap - EXIT
           printf 'SNAPSHOT_ID=%s\nRELEASE=%s\n' "$id" "$release"
           REMOTE
           )
