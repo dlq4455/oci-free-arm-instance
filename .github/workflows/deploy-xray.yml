@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
@@ -702,6 +703,12 @@ jobs:
     if: inputs.mode == 'promote-oracle'
     runs-on: ubuntu-latest
     steps:
+      - name: Obtain short-lived AWS DR credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::174132708135:role/WofoGithubDrFailover
+          aws-region: ap-northeast-1
+
       - name: Fence AWS, promote Oracle, switch DNS, and smoke
         env:
           PUBLIC_IP: ${{ inputs.public_ip }}
@@ -716,6 +723,48 @@ jobs:
           ssh_opts=(-i /tmp/oracle-ssh-key -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20)
 
+          ssm_run() {
+            local command=$1 command_id
+            command_id=$(aws ssm send-command \
+              --region ap-northeast-1 \
+              --instance-ids i-0bd82f23193b5cb2f \
+              --document-name AWS-RunShellScript \
+              --parameters "$(jq -cn --arg command "$command" '{commands:[$command]}')" \
+              --query 'Command.CommandId' --output text)
+            aws ssm wait command-executed --region ap-northeast-1 \
+              --command-id "$command_id" --instance-id i-0bd82f23193b5cb2f
+            aws ssm get-command-invocation --region ap-northeast-1 \
+              --command-id "$command_id" --instance-id i-0bd82f23193b5cb2f \
+              --query StandardOutputContent --output text
+          }
+
+          ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
+          snapshot=$(/usr/local/sbin/wofo-dr-hostctl inspect-current)
+          test "$(jq -r .role <<<"$status")" = standby
+          test "$(jq -r .release_sha <<<"$status")" = "$(jq -r .release_sha <<<"$snapshot")"
+          /usr/local/sbin/wofo-dr-hostctl verify-current \
+            "$(jq -r .snapshot_id <<<"$snapshot")" \
+            "$(jq -r .release_sha <<<"$snapshot")" 600 0
+          REMOTE
+
+          set +e
+          fence_output=$(ssm_run '/usr/local/sbin/wofo-dr-hostctl fence' 2>&1)
+          fence_rc=$?
+          set -e
+          if [ "$fence_rc" -ne 0 ]; then
+            aws_health=$(curl -fsS --max-time 10 https://wofo-aws-stage.airoute.xyz/health || true)
+            if [ "$(jq -r .origin <<<"$aws_health" 2>/dev/null)" = aws ] && \
+               [ "$(jq -r .role <<<"$aws_health" 2>/dev/null)" = primary ]; then
+              echo "$fence_output" >&2
+              echo 'AWS is still reachable and primary; refusing unfenced promotion.' >&2
+              exit 1
+            fi
+            echo 'AWS SSM and health are unavailable; continuing disaster promotion.'
+          fi
+
+          set +e
           result=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
           set -Eeuo pipefail
           status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
@@ -725,51 +774,16 @@ jobs:
           test "$(jq -r .release_sha <<<"$status")" = "$release"
           id=$(jq -r .snapshot_id <<<"$snapshot")
           /usr/local/sbin/wofo-dr-hostctl verify-current "$id" "$release" 600 0
-          aws_fenced=0
-          oracle_promoted=0
-          rollback_failed_promotion() {
-            rc=$?
-            if [ "$rc" -ne 0 ] && [ "$aws_fenced" -eq 1 ] && [ "$oracle_promoted" -eq 0 ]; then
-              sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-                -o BatchMode=yes -o IdentitiesOnly=yes \
-                -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-                ec2-user@35.73.41.205 \
-                'sudo -n /usr/local/sbin/wofo-dr-hostctl unfence-primary' || true
-            fi
-            exit "$rc"
-          }
-          trap rollback_failed_promotion EXIT
-          set +e
-          fence_output=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-            -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-            -o ConnectTimeout=15 ec2-user@35.73.41.205 \
-            'sudo -n /usr/local/sbin/wofo-dr-hostctl fence' 2>&1)
-          fence_rc=$?
-          set -e
-          set +e
-          aws_status=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-            -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-            -o ConnectTimeout=15 ec2-user@35.73.41.205 \
-            'sudo -n /usr/local/sbin/wofo-dr-hostctl status-json' 2>&1)
-          status_rc=$?
-          set -e
-          if [ "$status_rc" -eq 0 ] && [ "$(jq -r .role <<<"$aws_status")" = fenced ]; then
-            aws_fenced=1
-          elif [ "$fence_rc" -ne 0 ] && grep -Eqi 'timed out|no route|connection refused|network is unreachable' <<<"$fence_output $aws_status"; then
-            echo 'AWS network outage confirmed; continuing with Oracle promotion.'
-          else
-            echo "$fence_output" >&2
-            echo "$aws_status" >&2
-            exit 1
-          fi
           /usr/local/sbin/wofo-dr-hostctl promote "$id" "$release" 600 0
-          oracle_promoted=1
-          trap - EXIT
           printf 'SNAPSHOT_ID=%s\nRELEASE=%s\n' "$id" "$release"
           REMOTE
           )
+          promote_rc=$?
+          set -e
+          if [ "$promote_rc" -ne 0 ]; then
+            ssm_run '/usr/local/sbin/wofo-dr-hostctl unfence-primary' || true
+            exit "$promote_rc"
+          fi
           echo "$result"
           release=$(awk -F= '$1=="RELEASE"{print $2}' <<<"$result")
           test -n "$release"
