@@ -813,6 +813,12 @@ jobs:
     if: inputs.mode == 'failback-aws'
     runs-on: ubuntu-latest
     steps:
+      - name: Obtain short-lived AWS DR credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::174132708135:role/WofoGithubDrFailover
+          aws-region: ap-northeast-1
+
       - name: Sync Oracle to AWS, promote AWS, switch DNS, and demote Oracle
         env:
           PUBLIC_IP: ${{ inputs.public_ip }}
@@ -827,6 +833,25 @@ jobs:
           ssh_opts=(-i /tmp/oracle-ssh-key -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20)
 
+          ssm_run() {
+            local command=$1 command_id
+            command_id=$(aws ssm send-command \
+              --region ap-northeast-1 \
+              --instance-ids i-0bd82f23193b5cb2f \
+              --document-name AWS-RunShellScript \
+              --parameters "$(jq -cn --arg command "$command" '{commands:[$command]}')" \
+              --query 'Command.CommandId' --output text)
+            aws ssm wait command-executed --region ap-northeast-1 \
+              --command-id "$command_id" --instance-id i-0bd82f23193b5cb2f
+            aws ssm get-command-invocation --region ap-northeast-1 \
+              --command-id "$command_id" --instance-id i-0bd82f23193b5cb2f \
+              --query StandardOutputContent --output text
+          }
+          restore_oracle() {
+            ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" \
+              'sudo /usr/local/sbin/wofo-dr-hostctl unfence-primary' || true
+          }
+
           result=$(ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
           set -Eeuo pipefail
           status=$(/usr/local/sbin/wofo-dr-hostctl status-json)
@@ -834,29 +859,33 @@ jobs:
           release=$(jq -r .release_sha <<<"$status")
           /usr/local/sbin/wofo-dr-hostctl fence
           /usr/local/sbin/wofo-dr-hostctl replicate-to-peer
-          snapshot=$(sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-            -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-            ec2-user@35.73.41.205 \
-            'sudo -n /usr/local/sbin/wofo-dr-hostctl inspect-current')
-          id=$(jq -r .snapshot_id <<<"$snapshot")
-          test "$(jq -r .release_sha <<<"$snapshot")" = "$release"
-          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-            -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-            ec2-user@35.73.41.205 \
-            "sudo -n /usr/local/sbin/wofo-dr-hostctl verify-current '$id' '$release' 600 0"
-          sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
-            -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile=/var/lib/wofo/.ssh/known_hosts \
-            ec2-user@35.73.41.205 \
-            "sudo -n /usr/local/sbin/wofo-dr-hostctl promote '$id' '$release' 600 0"
-          printf 'SNAPSHOT_ID=%s\nRELEASE=%s\n' "$id" "$release"
+          printf 'RELEASE=%s\n' "$release"
           REMOTE
           )
           echo "$result"
           release=$(awk -F= '$1=="RELEASE"{print $2}' <<<"$result")
           test -n "$release"
+          set +e
+          snapshot=$(ssm_run '/usr/local/sbin/wofo-dr-hostctl inspect-current' 2>&1)
+          inspect_rc=$?
+          set -e
+          if [ "$inspect_rc" -ne 0 ]; then
+            echo "$snapshot" >&2
+            restore_oracle
+            exit "$inspect_rc"
+          fi
+          id=$(jq -r .snapshot_id <<<"$snapshot")
+          test "$(jq -r .release_sha <<<"$snapshot")" = "$release"
+          set +e
+          promote_output=$(ssm_run "/usr/local/sbin/wofo-dr-hostctl verify-current '$id' '$release' 600 0 && /usr/local/sbin/wofo-dr-hostctl promote '$id' '$release' 600 0" 2>&1)
+          promote_rc=$?
+          set -e
+          if [ "$promote_rc" -ne 0 ]; then
+            echo "$promote_output" >&2
+            restore_oracle
+            exit "$promote_rc"
+          fi
+          echo "$promote_output"
           curl -fsS -X PUT \
             -H "Authorization: Bearer $CF_DNS_TOKEN" \
             -H 'Content-Type: application/json' \
