@@ -10,6 +10,7 @@ on:
         options:
           - xray
           - wofo-dr
+          - wofo-assets
       instance_id:
         required: true
         type: string
@@ -503,5 +504,93 @@ jobs:
           echo "XRAY_AFTER=active"
           printf 'ORACLE_DR_PUBLIC_KEY='
           cat /var/lib/wofo/.ssh/wofo-dr-ed25519.pub
+          df -h /
+          REMOTE
+
+  deploy_wofo_assets:
+    if: inputs.mode == 'wofo-assets'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare scoped R2 and Oracle credentials
+        env:
+          R2_READ_TOKEN: ${{ secrets.WOFO_R2_READ_TOKEN }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test -n "$R2_READ_TOKEN"
+          test -n "$ORACLE_SSH_PRIVATE_KEY"
+          printf '%s' "$R2_READ_TOKEN" > /tmp/wofo-r2-read-token
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > /tmp/oracle-ssh-key
+          chmod 600 /tmp/oracle-ssh-key
+
+      - name: Stream release site from R2 to Oracle
+        env:
+          PUBLIC_IP: ${{ inputs.public_ip }}
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(
+            -i /tmp/oracle-ssh-key
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=20
+          )
+          scp "${ssh_opts[@]}" /tmp/wofo-r2-read-token "ubuntu@${PUBLIC_IP}:/tmp/"
+          ssh "${ssh_opts[@]}" "ubuntu@${PUBLIC_IP}" 'sudo bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          account=2db9ce499dd34cf76b6bfaad3bdf6b9a
+          bucket=wofo-files-prod
+          api="https://api.cloudflare.com/client/v4/accounts/$account/r2/buckets/$bucket/objects"
+          token=$(cat /tmp/wofo-r2-read-token)
+          root=/srv/wofo/releases-public/objects
+          listener_before=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          systemctl is-active --quiet xray
+
+          for prefix in downloads/ releases/; do
+            list=$(mktemp)
+            curl -fsS -H "Authorization: Bearer $token" \
+              "$api?prefix=${prefix//\//%2F}&per_page=1000" -o "$list"
+            jq -e '.success == true' "$list" >/dev/null
+            jq -c '.result[]' "$list" | while IFS= read -r item; do
+              key=$(jq -r '.key' <<<"$item")
+              size=$(jq -r '.size' <<<"$item")
+              etag=$(jq -r '.etag' <<<"$item" | tr -d '"')
+              target="$root/$key"
+              install -d -o root -g root -m 0755 "$(dirname "$target")"
+              valid=0
+              if [ -f "$target" ] && [ "$(stat -c %s "$target")" = "$size" ]; then
+                [ "$(md5sum "$target" | awk '{print $1}')" = "$etag" ] && valid=1
+              fi
+              if [ "$valid" -ne 1 ]; then
+                temporary="$target.part"
+                rm -f -- "$temporary"
+                curl -fsSL --retry 4 --retry-all-errors \
+                  -H "Authorization: Bearer $token" "$api/$key" -o "$temporary"
+                [ "$(stat -c %s "$temporary")" = "$size" ]
+                [ "$(md5sum "$temporary" | awk '{print $1}')" = "$etag" ]
+                chmod 0644 "$temporary"
+                mv -f "$temporary" "$target"
+              fi
+              echo "SYNCED $key $size"
+            done
+            rm -f "$list"
+          done
+
+          rm -f /tmp/wofo-r2-read-token
+          nginx -t
+          systemctl restart nginx.service
+          curl -fsS --max-time 10 http://127.0.0.1:8788/ >/dev/null
+          curl -fsS --max-time 10 http://127.0.0.1:8788/download >/dev/null
+          echo '1D183153FDAF8A307A11E96C259EA92381EFFD7710BFF130B0801D3666B56A9C  /srv/wofo/releases-public/objects/releases/wofo_app_pro-v1.1.8-build17-internal.apk' | sha256sum -c -
+          echo '91A941E7552DCDE729E7C477E95E37900E0EE7F9BB0834A710F559956D2763C5  /srv/wofo/releases-public/objects/releases/wofo_app_pro-v1.1.8-build17-x86_64-internal.apk' | sha256sum -c -
+          listener_after=$(ss -H -ltnp 'sport = :443' 2>/dev/null || true)
+          test "$listener_before" = "$listener_after"
+          systemctl is-active --quiet xray
+          find "$root/downloads" "$root/releases" -type f -printf '%s\n' \
+            | awk '{count += 1; bytes += $1} END {printf "RELEASE_OBJECTS=%d RELEASE_BYTES=%.0f\n", count, bytes}'
           df -h /
           REMOTE
