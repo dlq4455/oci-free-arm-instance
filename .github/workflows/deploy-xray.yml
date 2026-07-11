@@ -645,7 +645,7 @@ jobs:
           bash "$work/ops/aws-oracle-dr/install.sh" --env /etc/wofo/wofo.env
           bash "$work/ops/aws-oracle-dr/deploy-release.sh" \
             --artifact /tmp/wofo-release.tar.gz \
-            --release dbb8ce8b-oracle \
+            --release dbb8ce8b-prod \
             --sha256 "$RELEASE_SHA256" \
             --env /etc/wofo/wofo.env
           sudo -u wofo ssh -i /var/lib/wofo/.ssh/wofo-dr-ed25519 \
