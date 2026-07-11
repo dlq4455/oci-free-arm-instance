@@ -793,6 +793,14 @@ jobs:
             --data '{"type":"CNAME","name":"fy.airoute.xyz","content":"439094de-03e3-4a49-b66c-98d4a1a6b7c3.cfargotunnel.com","ttl":1,"proxied":true}' \
             'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/dns_records/2a7e7273cd2841022aec31783fd7020b' \
             | jq -e '.success == true' >/dev/null
+          routes=$(curl -fsS -H "Authorization: Bearer $CF_DNS_TOKEN" \
+            'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/workers/routes')
+          jq -r '.result[] | select(.pattern | startswith("fy.airoute.xyz")) | .id' <<<"$routes" \
+            | while read -r route_id; do
+                curl -fsS -X DELETE -H "Authorization: Bearer $CF_DNS_TOKEN" \
+                  "https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/workers/routes/$route_id" \
+                  | jq -e '.success == true' >/dev/null
+              done
           for _ in $(seq 1 20); do
             health=$(curl -fsS --max-time 10 https://fy.airoute.xyz/health || true)
             if [ "$(jq -r .origin <<<"$health" 2>/dev/null)" = oracle ] && \
@@ -898,6 +906,14 @@ jobs:
             --data '{"type":"CNAME","name":"fy.airoute.xyz","content":"a4fdf1b0-c0ac-4138-a432-fe72c5434776.cfargotunnel.com","ttl":1,"proxied":true}' \
             'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/dns_records/2a7e7273cd2841022aec31783fd7020b' \
             | jq -e '.success == true' >/dev/null
+          routes=$(curl -fsS -H "Authorization: Bearer $CF_DNS_TOKEN" \
+            'https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/workers/routes')
+          jq -r '.result[] | select(.pattern | startswith("fy.airoute.xyz")) | .id' <<<"$routes" \
+            | while read -r route_id; do
+                curl -fsS -X DELETE -H "Authorization: Bearer $CF_DNS_TOKEN" \
+                  "https://api.cloudflare.com/client/v4/zones/24156087a710149821874ddbb56c3ba2/workers/routes/$route_id" \
+                  | jq -e '.success == true' >/dev/null
+              done
           for _ in $(seq 1 20); do
             health=$(curl -fsS --max-time 10 https://fy.airoute.xyz/health || true)
             if [ "$(jq -r .origin <<<"$health" 2>/dev/null)" = aws ] && \
